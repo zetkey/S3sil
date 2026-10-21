@@ -1,0 +1,6 @@
+Official AWS Signature Version 4 test-suite vectors
+Source: https://github.com/awslabs/aws-c-auth/tree/main/tests/aws-signing-test-suite/v4
+Retrieved: 2026-10-20
+Files copied verbatim: header-canonical-request.txt, header-string-to-sign.txt,
+header-signature.txt, context.json, request.txt for a subset of cases that do not
+require dot-segment path normalization.

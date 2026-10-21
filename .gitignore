@@ -1,0 +1,52 @@
+# SwiftPM / build output
+.build/
+build/
+.swiftpm/
+DerivedData/
+*.dSYM/
+*.dSYM.zip
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# macOS cruft
+.DS_Store
+._*
+.AppleDouble
+.LSOverride
+
+# Editors
+.vscode/
+.idea/
+.fleet/
+*.swp
+*.swo
+*~
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+*.orig
+*.rej
+.Trash/
+
+# Secrets and local config
+.env
+.env.*
+*.pem
+*.p12
+*.pfx
+secrets/
+profiles.json
+profiles.unreadable-*.json
+
+# Internal QA/environment notes (not published)
+docs/internal/
+
+# Coverage / test output (optional)
+coverage/
+test-results/
+.codegraph
