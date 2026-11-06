@@ -110,9 +110,7 @@ final class AppState {
             browserTask?.cancel()
             browser = nil
             guard let profile = profiles.first(where: { $0.id == id }) else { return }
-            if profile.provider == .aws || profile.provider == .cloudflareR2
-                || profile.provider == .hitachi || profile.provider == .minio
-                || profile.provider == .generic {
+            if profile.provider.isS3 {
                 Task { await loadBuckets(for: id) }
             } else {
                 openRoot(profile: profile)
@@ -615,10 +613,6 @@ final class AppState {
 
     // Checks if the selected profile is S3-based (has buckets).
     var isS3Profile: Bool {
-        guard let profile = selectedProfile else { return false }
-        switch profile.provider {
-        case .aws, .cloudflareR2, .hitachi, .minio, .generic: return true
-        default: return false
-        }
+        selectedProfile?.provider.isS3 == true
     }
 }

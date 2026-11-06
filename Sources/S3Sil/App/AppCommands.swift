@@ -43,7 +43,7 @@ struct S3SilCommands: Commands {
                 }
             }
             .keyboardShortcut("r", modifiers: [.option, .command])
-            .disabled(app?.selectedProfile == nil)
+            .disabled(app?.selectedProfile == nil || !(app?.isS3Profile ?? false))
 
             Divider()
 

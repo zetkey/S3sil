@@ -92,7 +92,7 @@ struct ObjectBrowserView: View {
     private var header: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline, spacing: 9) {
-                Image(systemName: "shippingbox.fill")
+                Image(systemName: model.profile.provider.symbolName)
                     .foregroundStyle(.tint)
                     .font(.title3)
                 Text(model.containerName)
@@ -202,100 +202,121 @@ struct ObjectBrowserView: View {
     }
 
     private var table: some View {
-        Table(visibleObjects, selection: $model.selection, sortOrder: $sortOrder) {
-            TableColumn("Name", value: \S3Object.name) { object in
-                HStack(spacing: 8) {
-                    Image(systemName: object.isFolder ? "folder.fill" : "doc.text")
-                        .foregroundStyle(object.isFolder ? Color.accentColor : Color.secondary)
-                        .frame(width: 16)
-                    Text(object.name)
-                        .font(.system(.body, design: .monospaced))
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                }
-                .contentShape(Rectangle())
-                .onAppear {
-                    if object.id == visibleObjects.last?.id {
-                        Task { await model.loadMore() }
+        tableCore
+            .tableStyle(.inset(alternatesRowBackgrounds: true))
+            .scrollContentBackground(.hidden)
+            .id(model.prefix)
+            .contextMenu(forSelectionType: String.self) { keys in
+                contextMenu(keys: keys)
+            } primaryAction: { keys in
+                primaryAction(keys: keys)
+            }
+            .overlay {
+                ObjectDragSource(
+                    fileObjects: { row in
+                        let all = visibleObjects
+                        guard row >= 0, row < all.count, !all[row].isFolder else { return [] }
+                        let selected = DragExport.fileObjects(in: all, selectedKeys: model.selection)
+                        return selected.contains { $0.key == all[row].key } ? selected : [all[row]]
+                    },
+                    startDownload: { object, url, completion in
+                        app.downloadForDrag(
+                            object,
+                            to: url,
+                            profile: model.profile,
+                            containerName: model.containerName,
+                            backend: model.backend,
+                            completion: completion
+                        )
+                    },
+                    selectRow: { row, flags in
+                        handleRowClick(row, flags: flags)
+                    },
+                    activateRow: { row in
+                        let all = visibleObjects
+                        guard row >= 0, row < all.count else { return }
+                        primaryAction(keys: [all[row].key])
+                    },
+                    prepareContextMenu: { row in
+                        let all = visibleObjects
+                        guard row >= 0, row < all.count else { return }
+                        let key = all[row].key
+                        if !model.selection.contains(key) {
+                            model.selection = [key]
+                            selectionAnchor = row
+                        }
+                    },
+                    upload: { urls in
+                        app.upload(urls: urls)
+                    },
+                    setDropTargeted: { targeted in
+                        isDropTargeted = targeted
                     }
+                )
+            }
+    }
+
+    /// S3 shows a Storage Class column; flat backends (WebDAV/FTP/SFTP) don't.
+    @ViewBuilder
+    private var tableCore: some View {
+        if model.backend.capabilities.supportsBuckets {
+            Table(visibleObjects, selection: $model.selection, sortOrder: $sortOrder) {
+                commonColumns
+                storageClassColumn
+            }
+        } else {
+            Table(visibleObjects, selection: $model.selection, sortOrder: $sortOrder) {
+                commonColumns
+            }
+        }
+    }
+
+    @TableColumnBuilder<S3Object, KeyPathComparator<S3Object>>
+    private var commonColumns: some TableColumnContent<S3Object, KeyPathComparator<S3Object>> {
+        TableColumn("Name", value: \S3Object.name) { object in
+            HStack(spacing: 8) {
+                Image(systemName: object.isFolder ? "folder.fill" : "doc.text")
+                    .foregroundStyle(object.isFolder ? Color.accentColor : Color.secondary)
+                    .frame(width: 16)
+                Text(object.name)
+                    .font(.system(.body, design: .monospaced))
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            .contentShape(Rectangle())
+            .onAppear {
+                if object.id == visibleObjects.last?.id {
+                    Task { await model.loadMore() }
                 }
             }
-            .width(min: 240, ideal: 430)
-
-            TableColumn("Size", value: \S3Object.size) { object in
-                Text(object.isFolder ? "—" : Format.size(object.size))
-                    .font(.system(.caption, design: .monospaced))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .trailing)
-            }
-            .width(min: 80, ideal: 100, max: 160)
-
-            TableColumn("Modified", value: \S3Object.sortableModified) { object in
-                Text(Format.modified(object.lastModified))
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
-            .width(min: 130, ideal: 170, max: 220)
-
-            TableColumn("Storage Class", value: \S3Object.sortableStorageClass) { object in
-                Text(object.storageClass ?? (object.isFolder ? "—" : "STANDARD"))
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
-            }
-            .width(min: 100, ideal: 120, max: 160)
         }
-        .tableStyle(.inset(alternatesRowBackgrounds: true))
-        .scrollContentBackground(.hidden)
-        .id(model.prefix)
-        .contextMenu(forSelectionType: String.self) { keys in
-            contextMenu(keys: keys)
-        } primaryAction: { keys in
-            primaryAction(keys: keys)
+        .width(min: 240, ideal: 430)
+
+        TableColumn("Size", value: \S3Object.size) { object in
+            Text(object.isFolder ? "—" : Format.size(object.size))
+                .font(.system(.caption, design: .monospaced))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .trailing)
         }
-        .overlay {
-            ObjectDragSource(
-                fileObjects: { row in
-                    let all = visibleObjects
-                    guard row >= 0, row < all.count, !all[row].isFolder else { return [] }
-                    let selected = DragExport.fileObjects(in: all, selectedKeys: model.selection)
-                    return selected.contains { $0.key == all[row].key } ? selected : [all[row]]
-                },
-                startDownload: { object, url, completion in
-                    app.downloadForDrag(
-                        object,
-                        to: url,
-                        profile: model.profile,
-                        containerName: model.containerName,
-                        backend: model.backend,
-                        completion: completion
-                    )
-                },
-                selectRow: { row, flags in
-                    handleRowClick(row, flags: flags)
-                },
-                activateRow: { row in
-                    let all = visibleObjects
-                    guard row >= 0, row < all.count else { return }
-                    primaryAction(keys: [all[row].key])
-                },
-                prepareContextMenu: { row in
-                    let all = visibleObjects
-                    guard row >= 0, row < all.count else { return }
-                    let key = all[row].key
-                    if !model.selection.contains(key) {
-                        model.selection = [key]
-                        selectionAnchor = row
-                    }
-                },
-                upload: { urls in
-                    app.upload(urls: urls)
-                },
-                setDropTargeted: { targeted in
-                    isDropTargeted = targeted
-                }
-            )
+        .width(min: 80, ideal: 100, max: 160)
+
+        TableColumn("Modified", value: \S3Object.sortableModified) { object in
+            Text(Format.modified(object.lastModified))
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+        .width(min: 130, ideal: 170, max: 220)
+    }
+
+    @TableColumnBuilder<S3Object, KeyPathComparator<S3Object>>
+    private var storageClassColumn: some TableColumnContent<S3Object, KeyPathComparator<S3Object>> {
+        TableColumn("Storage Class", value: \S3Object.sortableStorageClass) { object in
+            Text(object.storageClass ?? (object.isFolder ? "—" : "STANDARD"))
+                .font(.system(.caption, design: .monospaced))
+                .foregroundStyle(.secondary)
+        }
+        .width(min: 100, ideal: 120, max: 160)
     }
 
     /// Mirrors the table's selection semantics now that the drag overlay owns row clicks.
@@ -337,16 +358,18 @@ struct ObjectBrowserView: View {
             }
             Button("Download") { app.download(objects: objects) }
                 .disabled(files.isEmpty)
-            Menu("Copy Presigned URL") {
-                ForEach(PresignExpiry.allCases) { option in
-                    Button(option.title) {
-                        if let file = files.first {
-                            app.copyPresignedURL(for: file, expires: option.rawValue)
+            if model.backend.capabilities.supportsPresignedURLs {
+                Menu("Copy Presigned URL") {
+                    ForEach(PresignExpiry.allCases) { option in
+                        Button(option.title) {
+                            if let file = files.first {
+                                app.copyPresignedURL(for: file, expires: option.rawValue)
+                            }
                         }
                     }
                 }
+                .disabled(files.count != 1)
             }
-            .disabled(files.count != 1)
             Divider()
             Button("Delete", role: .destructive) {
                 beginDelete(objects)
@@ -382,7 +405,7 @@ struct ObjectBrowserView: View {
                 Label("Empty Folder", systemImage: "folder")
             } description: {
                 Text(model.prefix.isEmpty
-                     ? "This bucket has no objects at the root."
+                     ? "This location is empty."
                      : "“\(model.prefix)” has no objects.")
             } actions: {
                 Button("Upload Files…") { showImporter = true }
@@ -412,7 +435,7 @@ struct ObjectBrowserView: View {
                     .foregroundStyle(.tint)
                 Text("Drop Files to Upload")
                     .font(.headline)
-                Text(model.prefix.isEmpty ? "Bucket root" : model.prefix)
+                Text(model.prefix.isEmpty ? "Root" : model.prefix)
                     .font(.system(.caption, design: .monospaced))
                     .foregroundStyle(.secondary)
             }

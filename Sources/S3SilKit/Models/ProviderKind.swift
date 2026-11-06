@@ -22,6 +22,14 @@ public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable 
 
     public var id: String { rawValue }
 
+    /// True for the S3-compatible providers; the others (WebDAV, FTP, SFTP) have no buckets.
+    public var isS3: Bool {
+        switch self {
+        case .aws, .cloudflareR2, .hitachi, .minio, .generic: return true
+        case .webdav, .ftp, .sftp: return false
+        }
+    }
+
     public var displayName: String {
         switch self {
         case .aws: return "AWS S3"

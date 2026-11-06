@@ -115,7 +115,7 @@ struct ContentView: View {
             ContentUnavailableView {
                 Label("Select a Connection", systemImage: "sidebar.left")
             } description: {
-                Text("Choose a connection in the sidebar to browse its buckets.")
+                Text("Choose a connection in the sidebar to browse its contents.")
             }
         }
     }
@@ -124,7 +124,7 @@ struct ContentView: View {
         ContentUnavailableView {
             Label("Welcome to S3Sil", systemImage: "externaldrive.badge.icloud")
         } description: {
-            Text("Browse AWS S3, Cloudflare R2, Hitachi HCP or Vantara, MinIO, and any S3-compatible endpoint — natively on your Mac.")
+            Text("Browse AWS S3, Cloudflare R2, Hitachi HCP or Vantara, MinIO, any S3-compatible endpoint, WebDAV, FTP, and SFTP — natively on your Mac.")
         } actions: {
             Button("Add Connection") {
                 app.beginNewConnection()

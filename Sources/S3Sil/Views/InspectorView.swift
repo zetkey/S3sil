@@ -25,13 +25,13 @@ struct InspectorView: View {
                     ContentUnavailableView {
                         Label("No Selection", systemImage: "sidebar.right")
                     } description: {
-                        Text("Select an object to inspect its key, size, ETag, and presigned URL.")
+                        Text("Select an object to inspect its details.")
                     }
                     .padding(.top, 30)
                 } else if let object = single {
                     objectHeader(object)
                     infoCard(object)
-                    if !object.isFolder {
+                    if !object.isFolder && model.backend.capabilities.supportsPresignedURLs {
                         presignCard(object)
                     }
                 } else {
@@ -76,10 +76,18 @@ struct InspectorView: View {
             }
             detail("Modified", Format.modified(object.lastModified), monospaced: false)
             if !object.isFolder {
-                detail("ETag", object.etag.isEmpty ? "—" : object.etag, monospaced: true)
-                detail("Storage Class", object.storageClass ?? "STANDARD", monospaced: true)
+                if !object.etag.isEmpty {
+                    detail("ETag", object.etag, monospaced: true)
+                }
+                if model.backend.capabilities.supportsBuckets {
+                    detail("Storage Class", object.storageClass ?? "STANDARD", monospaced: true)
+                }
             }
-            detail("Bucket", model.containerName, monospaced: true)
+            if model.backend.capabilities.supportsBuckets {
+                detail("Bucket", model.containerName, monospaced: true)
+            } else {
+                detail("Location", model.containerName.isEmpty ? "/" : model.containerName, monospaced: true)
+            }
             detail("Profile", model.profile.name, monospaced: false)
         }
         .padding(13)

@@ -22,8 +22,10 @@ struct SidebarView: View {
                         .contextMenu {
                             Button("Edit…") { app.beginEdit(profile) }
                             Button("Test Connection") { app.testConnection(profile) }
-                            Button("Create Bucket…") { app.beginCreateBucket(profile) }
-                                .disabled(app.bucketOperationStatus != nil)
+                            if profile.provider.isS3 {
+                                Button("Create Bucket…") { app.beginCreateBucket(profile) }
+                                    .disabled(app.bucketOperationStatus != nil)
+                            }
                             Divider()
                             Button("Delete…", role: .destructive) {
                                 app.requestDeleteConnection(profile)
@@ -32,7 +34,7 @@ struct SidebarView: View {
                 }
             }
 
-            if let profile = app.selectedProfile, [.aws, .cloudflareR2, .hitachi, .minio, .generic].contains(profile.provider) {
+            if let profile = app.selectedProfile, profile.provider.isS3 {
                 Section("Buckets") {
                     let buckets = app.bucketsByProfile[profile.id] ?? []
                     if app.loadingBuckets.contains(profile.id), buckets.isEmpty {

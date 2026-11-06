@@ -51,12 +51,7 @@ private enum ProtocolGroup: String, CaseIterable, Identifiable {
 
     /// Which S3 ProviderKind to restore when switching back to .s3.
     static func restoreS3Provider(from provider: ProviderKind) -> ProviderKind {
-        switch provider {
-        case .aws, .cloudflareR2, .hitachi, .minio, .generic:
-            return provider
-        default:
-            return .aws
-        }
+        provider.isS3 ? provider : .aws
     }
 }
 
@@ -275,7 +270,7 @@ struct ConnectionEditorView: View {
         ) {
             ForEach(ProviderKind.allCases) { kind in
                 // Show only S3-flavoured providers
-                if kind.isS3Variant {
+                if kind.isS3 {
                     Button {
                         provider = kind
                         applyPreset(kind)
@@ -1009,18 +1004,6 @@ private struct SecretField: View {
                 RoundedRectangle(cornerRadius: 7)
                     .strokeBorder(error != nil ? Color.red.opacity(0.55) : Color.secondary.opacity(0.25))
             )
-        }
-    }
-}
-
-// MARK: - ProviderKind helper
-
-private extension ProviderKind {
-    /// True for the five S3-variant providers shown in the grid.
-    var isS3Variant: Bool {
-        switch self {
-        case .aws, .cloudflareR2, .hitachi, .minio, .generic: return true
-        default: return false
         }
     }
 }
