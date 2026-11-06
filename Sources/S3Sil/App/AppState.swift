@@ -59,6 +59,9 @@ final class AppState {
     private var browserTask: Task<Void, Never>?
     private var toastTask: Task<Void, Never>?
 
+    private var credentialCache: [UUID: S3Credentials] = [:]
+    private var credentialsLoaded = false
+
     init(store: ConnectionStore = .defaultStore()) {
         self.store = store
         do {
@@ -279,10 +282,20 @@ final class AppState {
 
     // MARK: - Clients
 
+    /// Returns cached credentials, loading the whole consolidated dictionary from Keychain
+    /// once and caching it so subsequent connections never re-prompt for Keychain access.
+    func credentials(for profileID: UUID) throws -> S3Credentials? {
+        if !credentialsLoaded {
+            credentialCache = try KeychainStore.loadAll()
+            credentialsLoaded = true
+        }
+        return credentialCache[profileID]
+    }
+
     /// Creates an S3Client for bucket-level operations (listBuckets, createBucket, deleteBucket, ACLs).
     /// Only valid for S3 (or S3-compatible) profiles.
     func s3Client(for profile: ConnectionProfile) throws -> S3Client {
-        guard let credentials = try KeychainStore.load(profileID: profile.id) else {
+        guard let credentials = try credentials(for: profile.id) else {
             throw S3Error.validation("No credentials are stored for “\(profile.name)”. Edit the connection to add them.")
         }
         guard !credentials.accessKeyID.isEmpty, !credentials.secretAccessKey.isEmpty else {
@@ -304,7 +317,7 @@ final class AppState {
 
     /// Creates a StorageBackend for a non-S3 profile (WebDAV, FTP, SFTP).
     func backend(for profile: ConnectionProfile) throws -> any StorageBackend {
-        let credentials = try KeychainStore.load(profileID: profile.id)
+        let credentials = try credentials(for: profile.id)
         switch profile.provider {
         case .webdav:
             return try WebDAVBackend(profile: profile, credentials: credentials ?? S3Credentials(accessKeyID: "", secretAccessKey: ""))
@@ -325,7 +338,7 @@ final class AppState {
 
     func beginEdit(_ profile: ConnectionProfile) {
         do {
-            let credentials = try KeychainStore.load(profileID: profile.id)
+            let credentials = try credentials(for: profile.id)
             editingTarget = .edit(profile, credentials)
         } catch {
             present(error)
@@ -360,6 +373,7 @@ final class AppState {
             try? store.save(previous)
             throw error
         }
+        credentialCache[profile.id] = credentials
 
         profiles = updated
         editingTarget = nil
@@ -387,6 +401,7 @@ final class AppState {
             present(error)
             return
         }
+        credentialCache.removeValue(forKey: profile.id)
 
         var updated = profiles
         updated.removeAll { $0.id == profile.id }
@@ -421,7 +436,6 @@ final class AppState {
             do {
                 switch profile.provider {
                 case .webdav, .ftp, .sftp:
-                    _ = try KeychainStore.load(profileID: profile.id)
                     let backend = try self.backend(for: profile)
                     _ = try await backend.list(prefix: "", maxKeys: 1)
                     showToast("Connected to \(profile.name)")

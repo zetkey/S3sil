@@ -16,29 +16,116 @@ public enum KeychainError: Error, LocalizedError, Equatable {
 public enum KeychainStore {
     public static let service = "com.s3sil.credentials"
 
-    private static func baseQuery(profileID: UUID) -> [String: Any] {
+    /// All credentials live in a single generic-password item under this account,
+    /// so macOS prompts for Keychain access at most once per launch.
+    static let consolidatedAccount = "all-profiles"
+
+    private static func baseQuery() -> [String: Any] {
         [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: service,
-            kSecAttrAccount as String: profileID.uuidString
+            kSecAttrService as String: service
         ]
     }
 
+    private static func itemQuery(account: String) -> [String: Any] {
+        var query = baseQuery()
+        query[kSecAttrAccount as String] = account
+        return query
+    }
+
+    // MARK: - Public API
+
+    /// Reads the whole consolidated credential dictionary in one SecItem call.
+    /// On first call it also migrates any legacy per-profile items into the single item.
+    public static func loadAll() throws -> [UUID: S3Credentials] {
+        let items = try allItems()
+        var existing: [String: S3Credentials] = [:]
+        var strays: [(profileID: String, credentials: S3Credentials)] = []
+
+        for (account, data) in items {
+            if account == consolidatedAccount {
+                existing = try JSONDecoder().decode([String: S3Credentials].self, from: data)
+            } else if UUID(uuidString: account) != nil, let credentials = try? JSONDecoder().decode(S3Credentials.self, from: data) {
+                strays.append((profileID: account, credentials: credentials))
+            }
+        }
+
+        let merged = merge(existing: existing, strays: strays)
+        if merged != existing {
+            try writeConsolidated(merged)
+        }
+        for stray in strays {
+            try? deleteItem(account: stray.profileID)
+        }
+        return uuidDict(from: merged)
+    }
+
     public static func save(_ credentials: S3Credentials, profileID: UUID) throws {
-        let data = try JSONEncoder().encode(credentials)
-        var query = baseQuery(profileID: profileID)
+        var dict = try loadAll()
+        dict[profileID] = credentials
+        try writeConsolidated(stringDict(from: dict))
+    }
+
+    public static func delete(profileID: UUID) throws {
+        var dict = try loadAll()
+        dict.removeValue(forKey: profileID)
+        if dict.isEmpty {
+            try deleteItem(account: consolidatedAccount)
+        } else {
+            try writeConsolidated(stringDict(from: dict))
+        }
+    }
+
+    /// Pure merge of a consolidated dictionary with stray per-profile items.
+    /// Existing values win on collision; non-UUID accounts are ignored.
+    static func merge(
+        existing: [String: S3Credentials],
+        strays: [(profileID: String, credentials: S3Credentials)]
+    ) -> [String: S3Credentials] {
+        var merged = existing
+        for stray in strays {
+            guard UUID(uuidString: stray.profileID) != nil else { continue }
+            merged[stray.profileID] = merged[stray.profileID] ?? stray.credentials
+        }
+        return merged
+    }
+
+    // MARK: - Keychain plumbing
+
+    private static func allItems() throws -> [(account: String, data: Data)] {
+        var query = baseQuery()
+        query[kSecReturnData as String] = true
+        query[kSecReturnAttributes as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitAll
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return [] }
+        guard status == errSecSuccess else { throw KeychainError.status(status, "read") }
+
+        guard let items = result as? [[String: Any]] else { return [] }
+        var out: [(account: String, data: Data)] = []
+        for item in items {
+            guard let account = item[kSecAttrAccount as String] as? String,
+                  let data = item[kSecValueData as String] as? Data else { continue }
+            out.append((account: account, data: data))
+        }
+        return out
+    }
+
+    private static func writeConsolidated(_ dict: [String: S3Credentials]) throws {
+        let data = try JSONEncoder().encode(dict)
+        let query = itemQuery(account: consolidatedAccount)
         let attributes: [String: Any] = [kSecValueData as String: data]
         var status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
 
         if status == errSecItemNotFound {
-            query[kSecValueData as String] = data
-            query[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
-            status = SecItemAdd(query as CFDictionary, nil)
+            var addQuery = query
+            addQuery[kSecValueData as String] = data
+            addQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+            status = SecItemAdd(addQuery as CFDictionary, nil)
             if status == errSecDuplicateItem {
-                status = SecItemUpdate(
-                    baseQuery(profileID: profileID) as CFDictionary,
-                    attributes as CFDictionary
-                )
+                status = SecItemUpdate(query as CFDictionary, attributes as CFDictionary)
             }
         }
 
@@ -47,24 +134,30 @@ public enum KeychainStore {
         }
     }
 
-    public static func load(profileID: UUID) throws -> S3Credentials? {
-        var query = baseQuery(profileID: profileID)
-        query[kSecReturnData as String] = true
-        query[kSecMatchLimit as String] = kSecMatchLimitOne
-
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        if status == errSecItemNotFound { return nil }
-        guard status == errSecSuccess, let data = item as? Data else {
-            throw KeychainError.status(status, "read")
-        }
-        return try JSONDecoder().decode(S3Credentials.self, from: data)
-    }
-
-    public static func delete(profileID: UUID) throws {
-        let status = SecItemDelete(baseQuery(profileID: profileID) as CFDictionary)
+    private static func deleteItem(account: String) throws {
+        let status = SecItemDelete(itemQuery(account: account) as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw KeychainError.status(status, "delete")
         }
+    }
+
+    // MARK: - Key conversion
+
+    private static func uuidDict(from stringDict: [String: S3Credentials]) -> [UUID: S3Credentials] {
+        var out: [UUID: S3Credentials] = [:]
+        for (key, value) in stringDict {
+            if let uuid = UUID(uuidString: key) {
+                out[uuid] = value
+            }
+        }
+        return out
+    }
+
+    private static func stringDict(from uuidDict: [UUID: S3Credentials]) -> [String: S3Credentials] {
+        var out: [String: S3Credentials] = [:]
+        for (uuid, value) in uuidDict {
+            out[uuid.uuidString] = value
+        }
+        return out
     }
 }

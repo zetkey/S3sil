@@ -86,7 +86,7 @@ public struct ConnectionProfile: Identifiable, Hashable, Sendable {
 
 extension ConnectionProfile: Codable {}
 
-/// Secrets are stored as one generic-password item per profile UUID.
+/// Secrets are stored in a single generic-password Keychain item holding all profiles' credentials.
 public struct S3Credentials: Codable, Equatable, Sendable {
     public var accessKeyID: String
     public var secretAccessKey: String

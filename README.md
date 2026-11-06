@@ -67,7 +67,7 @@ Protocol support is selected with the picker in the connection editor. S3 featur
 
 ## Notes
 
-- Credentials (access key, secret key, optional session token) are stored only in the macOS Keychain, one generic-password item per profile; `profiles.json` under `~/Library/Application Support/S3Sil/` holds metadata only and is created with mode `0600`.
+- Credentials (access key, secret key, optional session token) are stored only in the macOS Keychain, in a single generic-password item shared by all profiles; this means macOS prompts for Keychain access at most once per launch (and zero on revisit within that session). `profiles.json` under `~/Library/Application Support/S3Sil/` holds metadata only and is created with mode `0600`.
 - The app bundle sets `NSAppTransportSecurity` → `NSAllowsArbitraryLoads = true` so LAN MinIO and other HTTP endpoints work; the app is not sandboxed.
 - Security: no credentials are ever written to logs, crash messages, or the repository; smoke/test credentials come from environment variables only. Endpoints default to HTTPS — use HTTP only on a trusted local network. The app sends no telemetry.
 
@@ -112,7 +112,7 @@ MINIO_REGION=us-east-1 \
 - FTP uses `/usr/bin/curl`; passive mode and explicit/implicit TLS are handled by curl. Firewall-restricted active-mode servers are not supported.
 - WebDAV uses Basic auth only (no Digest, OAuth, or Kerberos). Self-signed certificates are not specifically handled (relies on macOS trust evaluation).
 - Delete bucket requires an empty bucket.
-- The app is ad-hoc signed, so macOS may re-prompt for Keychain access after a rebuild; a Developer ID certificate avoids this.
+- The app is ad-hoc signed, so its CDHash identity changes on every rebuild, which makes macOS re-prompt for Keychain access per rebuild. The single-keychain-item cache above limits this to one prompt; to eliminate the prompt entirely across rebuilds, sign with a stable self-signed identity: Keychain Access → Certificate Assistant → Create a Certificate… (choose "Code Signing"), then build with `codesign -s "<Certificate Name>"` instead of ad-hoc signing. A Developer ID certificate works the same way.
 - Drag-out locates SwiftUI `Table`'s backing `NSTableView` and may need revisiting if macOS internals change ([`docs/drag-drop-research.md`](docs/drag-drop-research.md)).
 - ACL behavior has been exercised against MinIO only; the AWS, R2, and Hitachi ACL paths are covered by unit tests and runtime error handling, not live endpoint tests.
 - WebDAV, FTP, and SFTP backends have not been exercised against real servers in this test run; they are compile-tested and unit-tested (listing parsers) only.
