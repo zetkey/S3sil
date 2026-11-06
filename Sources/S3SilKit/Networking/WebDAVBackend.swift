@@ -142,6 +142,7 @@ public struct WebDAVBackend: StorageBackend, Sendable {
         <d:getlastmodified/>\
         <d:getetag/>\
         <d:resourcetype/>\
+        <d:getcontenttype/>\
         </d:prop>\
         </d:propfind>
         """
@@ -264,6 +265,7 @@ private final class PropfindDelegate: NSObject, XMLParserDelegate {
     private var currentLastModified: Date?
     private var currentEtag: String?
     private var currentIsCollection: Bool = false
+    private var currentContentType: String?
     private var currentPropstatStatus: Int?  // nil until we see the status
 
     private var insideResponse = false
@@ -310,6 +312,8 @@ private final class PropfindDelegate: NSObject, XMLParserDelegate {
                     currentDisplayName = text.isEmpty ? nil : text
                 case "collection":
                     currentIsCollection = true
+                case "getcontenttype":
+                    currentContentType = text.isEmpty ? nil : text
                 case "propstat":
                     // Only keep values if status was 2xx
                     if let status = currentPropstatStatus, (200..<300).contains(status) {
@@ -320,6 +324,7 @@ private final class PropfindDelegate: NSObject, XMLParserDelegate {
                         currentLastModified = nil
                         currentEtag = ""
                         currentIsCollection = false
+                        currentContentType = nil
                         currentDisplayName = nil
                     }
                     insidePropstat = false
@@ -362,6 +367,7 @@ private final class PropfindDelegate: NSObject, XMLParserDelegate {
         currentLastModified = nil
         currentEtag = ""
         currentIsCollection = false
+        currentContentType = nil
         currentPropstatStatus = nil
     }
 
@@ -391,9 +397,10 @@ private final class PropfindDelegate: NSObject, XMLParserDelegate {
         if key.isEmpty { return }
 
         // Determine kind
-        let kind: S3Object.Kind = currentIsCollection
+        let isFolder: Bool = currentIsCollection
             || key.hasSuffix("/")
-            ? .folder : .file
+            || (currentContentType?.lowercased().contains("directory") == true)
+        let kind: S3Object.Kind = isFolder ? .folder : .file
 
         let name = currentDisplayName
             ?? key.split(separator: "/").last.map(String.init)
