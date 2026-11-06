@@ -27,12 +27,14 @@ public struct FTPBackend: StorageBackend, Sendable {
     // MARK: - Helpers
 
     private func urlPath(_ suffix: String) -> String {
-        baseURL.hasSuffix("/") ? baseURL + suffix : baseURL + "/" + suffix
+        let base = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+        let cleanSuffix = suffix.hasPrefix("/") ? suffix : "/" + suffix
+        return base + cleanSuffix
     }
 
     private func absolutePath(_ suffix: String) -> String {
-        "/\(profile.basePath)/\(suffix)"
-            .replacingOccurrences(of: "//", with: "/")
+        if profile.basePath.isEmpty { return suffix.trimmingCharacters(in: CharacterSet(charactersIn: "/")) }
+        return "\(profile.basePath)/\(suffix)"
             .replacingOccurrences(of: "//", with: "/")
     }
 
@@ -53,7 +55,7 @@ public struct FTPBackend: StorageBackend, Sendable {
             }
         } catch {
             var listArgs = buildBaseArgs()
-            listArgs.append(contentsOf: ["--list-only", urlPath(dirPath)])
+            listArgs.append(urlPath(dirPath))
             listing = try await runCurl(listArgs)
         }
 

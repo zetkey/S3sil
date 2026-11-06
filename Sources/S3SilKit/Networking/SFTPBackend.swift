@@ -290,11 +290,8 @@ public struct SFTPBackend: StorageBackend, Sendable {
     // MARK: - Known hosts
 
     private func knownHostsPath() throws -> URL {
-        let appSupport = try FileManager.default.url(
-            for: .applicationSupportDirectory, in: .userDomainMask,
-            appropriateFor: nil, create: true
-        )
-        let dir = appSupport.appendingPathComponent("S3Sil")
+        let home = FileManager.default.homeDirectoryForCurrentUser
+        let dir = home.appendingPathComponent(".s3sil")
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         return dir.appendingPathComponent("known_hosts")
     }

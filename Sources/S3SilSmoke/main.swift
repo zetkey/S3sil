@@ -71,6 +71,25 @@ func fetchWithCurl(_ url: URL) throws -> CurlFetch {
     return CurlFetch(status: Int(statusText.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0, body: body)
 }
 
+// MARK: - Protocol smoke modes
+
+let mode = CommandLine.arguments.dropFirst().first
+
+if mode == "--webdav" {
+    try await smokeWebDAV()
+    exit(0)
+}
+if mode == "--ftp" {
+    try await smokeFTP()
+    exit(0)
+}
+if mode == "--sftp" {
+    try await smokeSFTP()
+    exit(0)
+}
+
+// MARK: - S3 smoke
+
 let endpointText = requiredEnvironment("MINIO_ENDPOINT")
 let accessKey = requiredEnvironment("MINIO_ACCESS_KEY")
 let secretKey = requiredEnvironment("MINIO_SECRET_KEY")
@@ -100,8 +119,6 @@ let profile = ConnectionProfile(
     region: region
 )
 let credentials = S3Credentials(accessKeyID: accessKey, secretAccessKey: secretKey)
-
-let mode = CommandLine.arguments.dropFirst().first
 
 if mode == "--seed", CommandLine.arguments.count >= 3 {
     let bucket = CommandLine.arguments[2]
@@ -417,4 +434,263 @@ do {
         await cleanup(client)
     }
     exit(1)
+}
+
+// MARK: - Protocol smoke functions
+
+func smokeWebDAV() async throws {
+    let profile = ConnectionProfile(
+        name: "WebDAV Smoke",
+        provider: .webdav,
+        endpoint: "http://localhost:8080"
+    )
+    let creds = S3Credentials(accessKeyID: "testuser", secretAccessKey: "testpass")
+    let backend = try WebDAVBackend(profile: profile, credentials: creds)
+    let testKey = "smoke-test-\(UUID().uuidString.prefix(8)).txt"
+    let testFolder = "smoke-testdir-\(UUID().uuidString.prefix(8))/"
+    let testContent = "WebDAV smoke test payload\n"
+
+    var failures = 0
+    func pass(_ op: String) { print("PASS: WebDAV — \(op)") }
+    func fail(_ op: String, _ msg: String) {
+        print("FAIL: WebDAV — \(op): \(msg)")
+        failures += 1
+    }
+
+    // 1. List root
+    do {
+        let listing = try await backend.list(prefix: "", maxKeys: 100)
+        let names = listing.objects.map(\.name)
+        guard names.contains("hello.txt") else { throw SmokeError.assertion("hello.txt not in listing") }
+        guard listing.objects.contains(where: { $0.isFolder && ($0.name == "subdir" || $0.name == "subdir/") }) else {
+            throw SmokeError.assertion("subdir folder not in listing")
+        }
+        pass("list root (\(listing.objects.count) entries)")
+    } catch { fail("list root", error.localizedDescription) }
+
+    // 2. Download
+    do {
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("s3sil-webdav-dl-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: dest) }
+        try await backend.download(key: "hello.txt", to: dest) { _, _ in }
+        let content = try String(contentsOf: dest, encoding: .utf8)
+        guard content.contains("hello from s3sil") else { throw SmokeError.assertion("bad download content") }
+        pass("download hello.txt")
+    } catch { fail("download", error.localizedDescription) }
+
+    // 3. Upload
+    do {
+        let src = FileManager.default.temporaryDirectory.appendingPathComponent("s3sil-webdav-up-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: src) }
+        try Data(testContent.utf8).write(to: src)
+        try await backend.upload(fileURL: src, key: testKey) { _, _ in }
+        // Verify via download
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("s3sil-webdav-vfy-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: dest) }
+        try await backend.download(key: testKey, to: dest) { _, _ in }
+        let content = try String(contentsOf: dest, encoding: .utf8)
+        guard content == testContent else { throw SmokeError.assertion("upload content mismatch") }
+        pass("upload \(testKey)")
+    } catch { fail("upload", error.localizedDescription) }
+
+    // 4. Create folder
+    do {
+        try await backend.createFolder(testFolder)
+        let listing = try await backend.list(prefix: "", maxKeys: 100)
+        guard listing.objects.contains(where: { $0.isFolder && $0.key == testFolder }) else {
+            throw SmokeError.assertion("folder not found after create")
+        }
+        pass("createFolder \(testFolder)")
+    } catch { fail("createFolder", error.localizedDescription) }
+
+    // 5. Delete (test file and folder)
+    do {
+        try await backend.delete([testKey, testFolder]) { _ in }
+        let listing = try await backend.list(prefix: "", maxKeys: 100)
+        guard !listing.objects.contains(where: { $0.key == testKey || $0.key == testFolder }) else {
+            throw SmokeError.assertion("deleted items still appear in listing")
+        }
+        pass("delete test artifacts")
+    } catch { fail("delete", error.localizedDescription) }
+
+    if failures > 0 {
+        print("FAIL: WebDAV (\(failures) failure(s))")
+        exit(1)
+    }
+    print("PASS: WebDAV — all operations")
+}
+
+func smokeFTP() async throws {
+    let profile = ConnectionProfile(
+        name: "FTP Smoke",
+        provider: .ftp,
+        host: "localhost",
+        port: 2121
+    )
+    let creds = S3Credentials(accessKeyID: "testuser", secretAccessKey: "testpass")
+    let backend = FTPBackend(profile: profile, credentials: creds)
+    let testKey = "smoke-test-\(UUID().uuidString.prefix(8)).txt"
+    let testFolder = "smoke-testdir-\(UUID().uuidString.prefix(8))/"
+    let testContent = "FTP smoke test payload\n"
+
+    var failures = 0
+    func pass(_ op: String) { print("PASS: FTP — \(op)") }
+    func fail(_ op: String, _ msg: String) {
+        print("FAIL: FTP — \(op): \(msg)")
+        failures += 1
+    }
+
+    // 1. List root
+    do {
+        let listing = try await backend.list(prefix: "", maxKeys: 100)
+        let names = listing.objects.map(\.name)
+        guard names.contains("hello.txt") else { throw SmokeError.assertion("hello.txt not in listing") }
+        guard listing.objects.contains(where: { $0.isFolder && ($0.name == "subdir" || $0.name == "subdir/") }) else {
+            throw SmokeError.assertion("subdir folder not in listing")
+        }
+        pass("list root (\(listing.objects.count) entries)")
+    } catch { fail("list root", error.localizedDescription) }
+
+    // 2. Download
+    do {
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("s3sil-ftp-dl-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: dest) }
+        try await backend.download(key: "hello.txt", to: dest) { _, _ in }
+        let content = try String(contentsOf: dest, encoding: .utf8)
+        guard content.contains("hello from s3sil") else { throw SmokeError.assertion("bad download content") }
+        pass("download hello.txt")
+    } catch { fail("download", error.localizedDescription) }
+
+    // 3. Upload
+    do {
+        let src = FileManager.default.temporaryDirectory.appendingPathComponent("s3sil-ftp-up-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: src) }
+        try Data(testContent.utf8).write(to: src)
+        try await backend.upload(fileURL: src, key: testKey) { _, _ in }
+        // Verify via download
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("s3sil-ftp-vfy-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: dest) }
+        try await backend.download(key: testKey, to: dest) { _, _ in }
+        let content = try String(contentsOf: dest, encoding: .utf8)
+        guard content == testContent else { throw SmokeError.assertion("upload content mismatch") }
+        pass("upload \(testKey)")
+    } catch { fail("upload", error.localizedDescription) }
+
+    // 4. Create folder
+    do {
+        try await backend.createFolder(testFolder)
+        let listing = try await backend.list(prefix: "", maxKeys: 100)
+        guard listing.objects.contains(where: { $0.isFolder && $0.key == testFolder }) else {
+            throw SmokeError.assertion("folder not found after create")
+        }
+        pass("createFolder \(testFolder)")
+    } catch { fail("createFolder", error.localizedDescription) }
+
+    // 5. Delete (test file and folder)
+    do {
+        try await backend.delete([testKey, testFolder]) { _ in }
+        let listing = try await backend.list(prefix: "", maxKeys: 100)
+        guard !listing.objects.contains(where: { $0.key == testKey || $0.key == testFolder }) else {
+            throw SmokeError.assertion("deleted items still appear in listing")
+        }
+        pass("delete test artifacts")
+    } catch { fail("delete", error.localizedDescription) }
+
+    if failures > 0 {
+        print("FAIL: FTP (\(failures) failure(s))")
+        exit(1)
+    }
+    print("PASS: FTP — all operations")
+}
+
+func smokeSFTP() async throws {
+    let profile = ConnectionProfile(
+        name: "SFTP Smoke",
+        provider: .sftp,
+        host: "localhost",
+        port: 2222,
+        basePath: "data",
+        privateKeyPath: "/tmp/s3sil-sftp-key"
+    )
+    let creds = S3Credentials(accessKeyID: "testuser", secretAccessKey: "")
+    let backend = SFTPBackend(profile: profile, credentials: creds)
+    let testKey = "smoke-test-\(UUID().uuidString.prefix(8)).txt"
+    let testFolder = "smoke-testdir-\(UUID().uuidString.prefix(8))/"
+    let testContent = "SFTP smoke test payload\n"
+
+    var failures = 0
+    func pass(_ op: String) { print("PASS: SFTP — \(op)") }
+    func fail(_ op: String, _ msg: String) {
+        print("FAIL: SFTP — \(op): \(msg)")
+        failures += 1
+    }
+
+    // 1. List root
+    do {
+        let listing = try await backend.list(prefix: "", maxKeys: 100)
+        let names = listing.objects.map(\.name)
+        guard names.contains("hello.txt") else { throw SmokeError.assertion("hello.txt not in listing") }
+        guard listing.objects.contains(where: { $0.isFolder && ($0.name == "subdir" || $0.name == "subdir/") }) else {
+            throw SmokeError.assertion("subdir folder not in listing")
+        }
+        pass("list root (\(listing.objects.count) entries)")
+    } catch { fail("list root", error.localizedDescription) }
+
+    // 2. Download
+    do {
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("s3sil-sftp-dl-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: dest) }
+        try await backend.download(key: "hello.txt", to: dest) { _, _ in }
+        let content = try String(contentsOf: dest, encoding: .utf8)
+        guard content.contains("hello from s3sil") else { throw SmokeError.assertion("bad download content") }
+        pass("download hello.txt")
+    } catch { fail("download", error.localizedDescription) }
+
+    // 3. Upload
+    do {
+        let src = FileManager.default.temporaryDirectory.appendingPathComponent("s3sil-sftp-up-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: src) }
+        try Data(testContent.utf8).write(to: src)
+        try await backend.upload(fileURL: src, key: testKey) { _, _ in }
+        // Verify via download
+        let dest = FileManager.default.temporaryDirectory.appendingPathComponent("s3sil-sftp-vfy-\(UUID().uuidString).txt")
+        defer { try? FileManager.default.removeItem(at: dest) }
+        try await backend.download(key: testKey, to: dest) { _, _ in }
+        let content = try String(contentsOf: dest, encoding: .utf8)
+        guard content == testContent else { throw SmokeError.assertion("upload content mismatch") }
+        pass("upload \(testKey)")
+    } catch { fail("upload", error.localizedDescription) }
+
+    // 4. Create folder
+    do {
+        try await backend.createFolder(testFolder)
+        let listing = try await backend.list(prefix: "", maxKeys: 100)
+        // Keys from SFTP may have a leading "/" and may differ in trailing "/"
+        let expectedKey = testFolder
+        let altKey = "/" + testFolder.dropLast()
+        guard listing.objects.contains(where: { $0.isFolder && ($0.key == expectedKey || $0.key == altKey) }) else {
+            throw SmokeError.assertion("folder not found after create (expected \(expectedKey) or \(altKey), got: \(listing.objects.filter(\.isFolder).map(\.key))")
+        }
+        pass("createFolder \(testFolder)")
+    } catch { fail("createFolder", error.localizedDescription) }
+
+    // 5. Delete (test file and folder)
+    do {
+        try await backend.delete([testKey, testFolder]) { _ in }
+        let listing = try await backend.list(prefix: "", maxKeys: 100)
+        let keysFound = listing.objects.map(\.key)
+        let altTestKey = "/" + testKey
+        let altTestFolder = "/" + testFolder.dropLast()
+        let stillPresent = keysFound.filter { $0 == testKey || $0 == testFolder || $0 == altTestKey || $0 == altTestFolder }
+        guard stillPresent.isEmpty else {
+            throw SmokeError.assertion("deleted items still appear in listing: \(stillPresent)")
+        }
+        pass("delete test artifacts")
+    } catch { fail("delete", error.localizedDescription) }
+
+    if failures > 0 {
+        print("FAIL: SFTP (\(failures) failure(s))")
+        exit(1)
+    }
+    print("PASS: SFTP — all operations")
 }
