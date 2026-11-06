@@ -35,19 +35,19 @@ public enum KeychainStore {
 
     // MARK: - Public API
 
-    /// Reads the whole consolidated credential dictionary in one SecItem call.
-    /// On first call it also migrates any legacy per-profile items into the single item.
+    /// Reads the consolidated credential dictionary and, on first call, migrates
+    /// any legacy per-profile items into the single item.
     public static func loadAll() throws -> [UUID: S3Credentials] {
-        let items = try allItems()
         var existing: [String: S3Credentials] = [:]
-        var strays: [(profileID: String, credentials: S3Credentials)] = []
+        if let data = try readItemData(account: consolidatedAccount) {
+            existing = try JSONDecoder().decode([String: S3Credentials].self, from: data)
+        }
 
-        for (account, data) in items {
-            if account == consolidatedAccount {
-                existing = try JSONDecoder().decode([String: S3Credentials].self, from: data)
-            } else if UUID(uuidString: account) != nil, let credentials = try? JSONDecoder().decode(S3Credentials.self, from: data) {
-                strays.append((profileID: account, credentials: credentials))
-            }
+        var strays: [(profileID: String, credentials: S3Credentials)] = []
+        for account in try legacyAccounts() {
+            guard let data = try readItemData(account: account),
+                  let credentials = try? JSONDecoder().decode(S3Credentials.self, from: data) else { continue }
+            strays.append((profileID: account, credentials: credentials))
         }
 
         let merged = merge(existing: existing, strays: strays)
@@ -92,9 +92,22 @@ public enum KeychainStore {
 
     // MARK: - Keychain plumbing
 
-    private static func allItems() throws -> [(account: String, data: Data)] {
-        var query = baseQuery()
+    private static func readItemData(account: String) throws -> Data? {
+        var query = itemQuery(account: account)
         query[kSecReturnData as String] = true
+        query[kSecMatchLimit as String] = kSecMatchLimitOne
+
+        var result: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &result)
+        if status == errSecItemNotFound { return nil }
+        guard status == errSecSuccess else { throw KeychainError.status(status, "read") }
+        return result as? Data
+    }
+
+    /// Attributes-only enumeration of every stored account. Never combined with
+    /// `kSecReturnData` — macOS rejects that pairing with `kSecMatchLimitAll`.
+    private static func legacyAccounts() throws -> [String] {
+        var query = baseQuery()
         query[kSecReturnAttributes as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitAll
 
@@ -104,13 +117,11 @@ public enum KeychainStore {
         guard status == errSecSuccess else { throw KeychainError.status(status, "read") }
 
         guard let items = result as? [[String: Any]] else { return [] }
-        var out: [(account: String, data: Data)] = []
-        for item in items {
-            guard let account = item[kSecAttrAccount as String] as? String,
-                  let data = item[kSecValueData as String] as? Data else { continue }
-            out.append((account: account, data: data))
+        return items.compactMap { item in
+            guard let account = item[kSecAttrAccount as String] as? String else { return nil }
+            guard UUID(uuidString: account) != nil, account != consolidatedAccount else { return nil }
+            return account
         }
-        return out
     }
 
     private static func writeConsolidated(_ dict: [String: S3Credentials]) throws {
