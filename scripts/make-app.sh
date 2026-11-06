@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:-"S3Sil Local"}"
+
 APP="$ROOT/build/S3Sil.app"
 CONTENTS="$APP/Contents"
 
@@ -71,7 +73,16 @@ PLIST
 
 printf 'APPL????' > "$CONTENTS/PkgInfo"
 
-codesign --force --sign - "$APP" >/dev/null
+# security find-identity exits 0 even when the named identity is absent — match the name in the list instead
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "\"$CODE_SIGN_IDENTITY\""; then
+    codesign --force --sign "$CODE_SIGN_IDENTITY" "$APP" >/dev/null
+    echo "Signed with stable identity: $CODE_SIGN_IDENTITY"
+else
+    codesign --force --sign - "$APP" >/dev/null
+    echo "Identity \"$CODE_SIGN_IDENTITY\" not found — signed ad-hoc (Keychain may re-prompt after rebuilds)."
+    echo "Create a Code Signing certificate named \"$CODE_SIGN_IDENTITY\" in Keychain Access →"
+    echo "Certificate Assistant → Create a Certificate → type \"Code Signing\", or set CODE_SIGN_IDENTITY env var."
+fi
 
 echo
 echo "Binary architecture:"

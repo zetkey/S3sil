@@ -90,7 +90,7 @@ Shortcuts: Command-N new connection, Command-U upload, Command-D download, Shift
 swift test
 ```
 
-Current result: **55 tests in 2 suites, all passing** (Swift Testing), covering the official AWS SigV4 test vectors, presigned URLs, endpoint resolution, S3 XML parsing, listing dedupe, multipart sizing, provider ACL gating, profile storage, backward-compatible connection decoding, and FTP/MLSD/Unix/DOS listing parsers.
+Current result: **64 tests in 3 suites, all passing** (Swift Testing), covering the official AWS SigV4 test vectors, presigned URLs, endpoint resolution, S3 XML parsing, listing dedupe, multipart sizing, provider ACL gating, profile storage, backward-compatible connection decoding, and FTP/MLSD/Unix/DOS listing parsers.
 
 An end-to-end smoke run against a local MinIO exercises bucket create/delete, object upload (including a multipart round-trip with byte-for-byte comparison), listings with pagination, presigned downloads, and batched deletes:
 
@@ -112,7 +112,7 @@ MINIO_REGION=us-east-1 \
 - FTP uses `/usr/bin/curl`; passive mode and explicit/implicit TLS are handled by curl. Firewall-restricted active-mode servers are not supported.
 - WebDAV uses Basic auth only (no Digest, OAuth, or Kerberos). Self-signed certificates are not specifically handled (relies on macOS trust evaluation).
 - Delete bucket requires an empty bucket.
-- The app is ad-hoc signed, so its CDHash identity changes on every rebuild, which makes macOS re-prompt for Keychain access per rebuild. The single-keychain-item cache above limits this to one prompt; to eliminate the prompt entirely across rebuilds, sign with a stable self-signed identity: Keychain Access → Certificate Assistant → Create a Certificate… (choose "Code Signing"), then build with `codesign -s "<Certificate Name>"` instead of ad-hoc signing. A Developer ID certificate works the same way.
+- The app is signed by `scripts/make-app.sh` with a Code Signing certificate named "S3Sil Local" when one exists (`CODE_SIGN_IDENTITY` env var overrides the name), falling back to ad-hoc signing otherwise; ad-hoc builds change CDHash identity every rebuild, so macOS re-prompts for Keychain access (the single-keychain-item cache above limits this to one prompt). To eliminate the prompt entirely across rebuilds, create the certificate: Keychain Access → Certificate Assistant → Create a Certificate… (choose "Code Signing"). A Developer ID certificate works the same way.
 - Drag-out locates SwiftUI `Table`'s backing `NSTableView` and may need revisiting if macOS internals change ([`docs/drag-drop-research.md`](docs/drag-drop-research.md)).
 - ACL behavior has been exercised against MinIO only; the AWS, R2, and Hitachi ACL paths are covered by unit tests and runtime error handling, not live endpoint tests.
 - WebDAV, FTP, and SFTP backends have not been exercised against real servers in this test run; they are compile-tested and unit-tested (listing parsers) only.
