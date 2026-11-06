@@ -45,7 +45,7 @@ public struct WebDAVBackend: StorageBackend, Sendable {
         request.httpBody = propfindBody
 
         let (data, response) = try await execute(request)
-        let entries = try parsePropfind(data, relativeTo: url)
+        let entries = applyAmbiguousFolderHeuristic(try parsePropfind(data, relativeTo: url))
         let limited = Array(entries.prefix(maxKeys))
         return ObjectListing(objects: limited, nextToken: nil, isTruncated: false)
     }
@@ -53,10 +53,23 @@ public struct WebDAVBackend: StorageBackend, Sendable {
     public func createFolder(_ key: String) async throws {
         let folderKey = key.hasSuffix("/") ? key : key + "/"
         let url = urlForKey(folderKey)
-        var request = buildRequest(method: "MKCOL", url: url)
-        // Some servers want an empty PUT body with content-type for folders.
-        // MKCOL is standard WebDAV; if it fails, fall through to the caller.
-        _ = try await executeWithStatus(request)
+
+        // MKCOL is the standard WebDAV way to create a collection.
+        let (data, response, status) = try await executeRaw(buildRequest(method: "MKCOL", url: url))
+        if (200..<300).contains(status) { return }
+
+        // Koofr rejects MKCOL with 405; fall back to an empty PUT on the
+        // trailing-slash path. Any other non-2xx status is a real error.
+        guard status == 405 else {
+            throw S3Error.from(data: data, statusCode: status, headers: headerDict(response))
+        }
+
+        var put = buildRequest(method: "PUT", url: url)
+        put.httpBody = Data()
+        let (putData, putResponse, putStatus) = try await executeRaw(put)
+        guard (200..<300).contains(putStatus) else {
+            throw S3Error.from(data: putData, statusCode: putStatus, headers: headerDict(putResponse))
+        }
     }
 
     public func delete(_ keys: [String],
@@ -149,15 +162,20 @@ public struct WebDAVBackend: StorageBackend, Sendable {
         return Data(xml.utf8)
     }
 
-    private func urlForKey(_ key: String) -> URL {
+    func urlForKey(_ key: String) -> URL {
         guard !key.isEmpty else { return baseURL }
+        // NOTE: Appending the encoded key to the base path (rather than resolving it
+        // relative to baseURL) is required — `URL(string:relativeTo:)` drops the
+        // base's own path components (e.g. /dav/Koofr) when the key is present.
         let encoded = key
-            .split(separator: "/", omittingEmptySubsequences: false)
+            .split(separator: "/", omittingEmptySubsequences: true)
             .map { $0.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? String($0) }
             .joined(separator: "/")
-        // If key ends with "/", trailing segment is empty → preserve trailing slash
+        let baseString = baseURL.absoluteString.hasSuffix("/")
+            ? baseURL.absoluteString
+            : baseURL.absoluteString + "/"
         let trailing = key.hasSuffix("/") ? "/" : ""
-        return URL(string: encoded + trailing, relativeTo: baseURL)?.absoluteURL ?? baseURL
+        return URL(string: baseString + encoded + trailing) ?? baseURL
     }
 
     private func buildRequest(method: String, url: URL) -> URLRequest {
@@ -177,15 +195,14 @@ public struct WebDAVBackend: StorageBackend, Sendable {
         return (data, response)
     }
 
-    @discardableResult
-    private func executeWithStatus(_ request: URLRequest) async throws -> (Data, HTTPURLResponse, Int) {
+    /// Send a request and return the raw status code without throwing on non-2xx.
+    /// Only network / cancellation / non-HTTP failures throw. Callers that must
+    /// inspect the status (createFolder's 405 fallback) use this directly.
+    private func executeRaw(_ request: URLRequest) async throws -> (Data, HTTPURLResponse, Int) {
         do {
             let (data, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else {
                 throw S3Error(message: "The server returned an invalid response.")
-            }
-            guard (200..<300).contains(http.statusCode) else {
-                throw S3Error.from(data: data, statusCode: http.statusCode, headers: headerDict(http))
             }
             return (data, http, http.statusCode)
         } catch is CancellationError {
@@ -198,6 +215,15 @@ public struct WebDAVBackend: StorageBackend, Sendable {
             }
             throw S3Error.network(error, host: profile.endpoint)
         }
+    }
+
+    @discardableResult
+    private func executeWithStatus(_ request: URLRequest) async throws -> (Data, HTTPURLResponse, Int) {
+        let result = try await executeRaw(request)
+        guard (200..<300).contains(result.2) else {
+            throw S3Error.from(data: result.0, statusCode: result.2, headers: headerDict(result.1))
+        }
+        return result
     }
 
     private func headerDict(_ response: HTTPURLResponse) -> [String: String] {
@@ -221,7 +247,7 @@ public struct WebDAVBackend: StorageBackend, Sendable {
             request.setValue("1", forHTTPHeaderField: "Depth")
             request.httpBody = propfindBody
             let (data, _) = try await execute(request)
-            let entries = try parsePropfind(data, relativeTo: url)
+            let entries = applyAmbiguousFolderHeuristic(try parsePropfind(data, relativeTo: url))
             for entry in entries {
                 keys.append(entry.key)
                 if entry.isFolder, entry.key != prefix {
@@ -234,7 +260,7 @@ public struct WebDAVBackend: StorageBackend, Sendable {
 
     // MARK: - PROPFIND parsing
 
-    private func parsePropfind(_ data: Data, relativeTo requestURL: URL) throws -> [S3Object] {
+    func parsePropfind(_ data: Data, relativeTo requestURL: URL) throws -> [S3Object] {
         let parser = XMLParser(data: data)
         let delegate = PropfindDelegate(baseURL: baseURL, requestURL: requestURL)
         parser.delegate = delegate
@@ -245,6 +271,25 @@ public struct WebDAVBackend: StorageBackend, Sendable {
             throw S3Error(message: "Failed to parse WebDAV response.")
         }
         return delegate.entries
+    }
+
+    /// Classify entries that no standard WebDAV folder signal resolved. Servers
+    /// like Koofr report folders as 0-byte, collection-less resources with no
+    /// trailing slash — indistinguishable from empty files except that files
+    /// virtually always carry a name extension. The filename heuristic only fires
+    /// when the listing contained NO explicitly-signalled folder at all, so servers
+    /// that do emit `<collection/>`/trailing slashes keep genuine 0-byte
+    /// extension-less files classified as files.
+    func applyAmbiguousFolderHeuristic(_ entries: [S3Object]) -> [S3Object] {
+        guard !entries.contains(where: \.isFolder) else { return entries }
+        return entries.map { entry in
+            var e = entry
+            if e.kind == .file, e.size == 0, (e.name as NSString).pathExtension.isEmpty {
+                e.kind = .folder
+                if !e.key.hasSuffix("/") { e.key += "/" }
+            }
+            return e
+        }
     }
 }
 
