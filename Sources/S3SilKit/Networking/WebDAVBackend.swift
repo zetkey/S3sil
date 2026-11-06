@@ -44,7 +44,7 @@ public struct WebDAVBackend: StorageBackend, Sendable {
         request.setValue("1", forHTTPHeaderField: "Depth")
         request.httpBody = propfindBody
 
-        let (data, response) = try await execute(request)
+        let (data, _) = try await execute(request)
         let entries = applyAmbiguousFolderHeuristic(try parsePropfind(data, relativeTo: url))
         let limited = Array(entries.prefix(maxKeys))
         return ObjectListing(objects: limited, nextToken: nil, isTruncated: false)
@@ -83,7 +83,7 @@ public struct WebDAVBackend: StorageBackend, Sendable {
             status("Deleting \(fileKeys.count) item\(fileKeys.count == 1 ? "" : "s")…")
             for key in fileKeys {
                 let url = urlForKey(key)
-                var request = buildRequest(method: "DELETE", url: url)
+                let request = buildRequest(method: "DELETE", url: url)
                 _ = try await executeWithStatus(request)
             }
         }
@@ -96,12 +96,12 @@ public struct WebDAVBackend: StorageBackend, Sendable {
             // Delete files first (not folders), deepest first
             for key in nested.sorted().reversed() {
                 let url = urlForKey(key)
-                var request = buildRequest(method: "DELETE", url: url)
+                let request = buildRequest(method: "DELETE", url: url)
                 _ = try await executeWithStatus(request)
             }
             // Delete the folder itself
             let url = urlForKey(folder)
-            var request = buildRequest(method: "DELETE", url: url)
+            let request = buildRequest(method: "DELETE", url: url)
             _ = try await executeWithStatus(request)
         }
     }
@@ -434,7 +434,6 @@ private final class PropfindDelegate: NSObject, XMLParserDelegate {
 
         // Skip self-referencing entry
         let requestPath = requestURL.path.hasSuffix("/") ? requestURL.path : requestURL.path + "/"
-        let entryPath = key.hasSuffix("/") ? key : key + "/"
         let requestKey = String(requestPath.dropFirst(baseURL.path.count))
             .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
         let entryKey = key.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
