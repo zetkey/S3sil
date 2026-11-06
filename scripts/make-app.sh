@@ -6,6 +6,15 @@ cd "$ROOT"
 
 CODE_SIGN_IDENTITY="${CODE_SIGN_IDENTITY:-"S3Sil Local"}"
 
+# Usage: make-app.sh [--identity "Name" | "Name"]
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --identity=*) CODE_SIGN_IDENTITY="${1#--identity=}"; shift ;;
+        --identity)   CODE_SIGN_IDENTITY="${2:?--identity requires a name}"; shift 2 ;;
+        *)            CODE_SIGN_IDENTITY="$1"; shift ;;
+    esac
+done
+
 APP="$ROOT/build/S3Sil.app"
 CONTENTS="$APP/Contents"
 
