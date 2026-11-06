@@ -123,7 +123,7 @@ private struct TransferRow: View {
                         .lineLimit(1)
                         .help(message)
                 } else {
-                    Text("\(item.bucket) / \(item.key)")
+                    Text("\(item.locationLabel) / \(item.key)")
                         .font(.system(.caption2, design: .monospaced))
                         .foregroundStyle(.secondary)
                         .lineLimit(1)

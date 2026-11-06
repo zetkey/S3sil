@@ -6,8 +6,8 @@ import S3SilKit
 @Observable
 final class ObjectBrowserModel {
     let profile: ConnectionProfile
-    let bucket: String
-    let client: S3Client
+    let containerName: String
+    let backend: any StorageBackend
     let identity = UUID()
 
     var prefix: String
@@ -22,15 +22,19 @@ final class ObjectBrowserModel {
     var loadMoreError: String?
     var hasMore = false
 
-    private var nextToken: String?
     private var generation = 0
     private let onError: (S3Error) -> Void
 
-    init(profile: ConnectionProfile, bucket: String, client: S3Client,
+    /// Display name for the bucket/container in breadcrumbs (empty for root-only backends).
+    var containerDisplayName: String {
+        containerName.isEmpty ? profile.name : containerName
+    }
+
+    init(profile: ConnectionProfile, containerName: String, backend: any StorageBackend,
          onError: @escaping (S3Error) -> Void) {
         self.profile = profile
-        self.bucket = bucket
-        self.client = client
+        self.containerName = containerName
+        self.backend = backend
         self.prefix = ""
         self.onError = onError
     }
@@ -73,16 +77,10 @@ final class ObjectBrowserModel {
         if clearSelection { selection.removeAll() }
 
         do {
-            let page = try await client.listObjects(
-                bucket: bucket,
-                prefix: prefix,
-                delimiter: "/",
-                continuationToken: nil
-            )
+            let page = try await backend.list(prefix: prefix, maxKeys: 1000)
             guard generation == self.generation else { return }
             objects = Self.sorted(page.objects)
-            nextToken = page.nextToken
-            hasMore = page.isTruncated && page.nextToken != nil
+            hasMore = page.isTruncated
             let keys = Set(objects.map(\.key))
             selection.formIntersection(keys)
         } catch is CancellationError {
@@ -98,24 +96,18 @@ final class ObjectBrowserModel {
     }
 
     func loadMore() async {
-        guard hasMore, !isLoading, !isLoadingMore, let token = nextToken else { return }
+        guard hasMore, !isLoading, !isLoadingMore else { return }
         let generation = self.generation
         isLoadingMore = true
         defer { isLoadingMore = false }
         loadMoreError = nil
 
         do {
-            let page = try await client.listObjects(
-                bucket: bucket,
-                prefix: prefix,
-                delimiter: "/",
-                continuationToken: token
-            )
+            let page = try await backend.list(prefix: prefix, maxKeys: 1000)
             guard generation == self.generation else { return }
             let existing = Set(objects.map(\.key))
             objects = Self.sorted(objects + page.objects.filter { !existing.contains($0.key) })
-            nextToken = page.nextToken
-            hasMore = page.isTruncated && page.nextToken != nil && page.nextToken != token
+            hasMore = page.isTruncated
         } catch is CancellationError {
             return
         } catch {
@@ -136,7 +128,6 @@ final class ObjectBrowserModel {
         objects = []
         selection.removeAll()
         searchText = ""
-        nextToken = nil
         hasMore = false
         loadError = nil
         loadMoreError = nil
@@ -178,7 +169,7 @@ final class ObjectBrowserModel {
         guard !trimmed.contains("/") else {
             throw S3Error.validation("Folder names cannot contain “/”.")
         }
-        try await client.createFolder(bucket: bucket, key: prefix + trimmed + "/")
+        try await backend.createFolder(prefix + trimmed + "/")
         await reload()
     }
 
@@ -192,84 +183,15 @@ final class ObjectBrowserModel {
         }
 
         do {
-            let fileKeys = targets.filter { !$0.isFolder }.map(\.key)
-            if !fileKeys.isEmpty {
-                deleteStatus = "Deleting \(fileKeys.count) object\(fileKeys.count == 1 ? "" : "s")…"
-                try await deleteKeys(fileKeys)
+            let keys = targets.map(\.key)
+            try await backend.delete(keys) { [weak self] status in
+                Task { @MainActor in self?.deleteStatus = status }
             }
-
-            for folder in targets where folder.isFolder {
-                deleteStatus = "Listing \(folder.name)…"
-                let keys = try await allKeys(under: folder.key)
-                if !keys.isEmpty {
-                    deleteStatus = "Deleting \(keys.count) item\(keys.count == 1 ? "" : "s") in \(folder.name)…"
-                    try await deleteKeys(keys)
-                }
-            }
-
             selection.removeAll()
             await reload()
         } catch {
             await reload()
             onError(error as? S3Error ?? S3Error(message: error.localizedDescription))
-        }
-    }
-
-    private func allKeys(under folderPrefix: String) async throws -> [String] {
-        var keys: [String] = []
-        var token: String?
-        while true {
-            let page = try await client.listObjects(
-                bucket: bucket,
-                prefix: folderPrefix,
-                delimiter: nil,
-                continuationToken: token,
-                maxKeys: 1000
-            )
-            keys.append(contentsOf: page.objects.filter { !$0.isFolder }.map(\.key))
-            guard page.isTruncated, let next = page.nextToken, next != token else { break }
-            token = next
-        }
-        return keys
-    }
-
-    private func deleteKeys(_ keys: [String]) async throws {
-        guard !keys.isEmpty else { return }
-        let chunks = stride(from: 0, to: keys.count, by: 1000).map {
-            Array(keys[$0..<min($0 + 1000, keys.count)])
-        }
-        let client = self.client
-        let bucket = self.bucket
-        let width = min(4, chunks.count)
-        var failures: [DeleteFailure] = []
-
-        try await withThrowingTaskGroup(of: [DeleteFailure].self) { group in
-            var next = 0
-            while next < width {
-                let chunk = chunks[next]
-                group.addTask {
-                    try await client.deleteObjects(bucket: bucket, keys: chunk)
-                }
-                next += 1
-            }
-            while let result = try await group.next() {
-                failures.append(contentsOf: result)
-                if next < chunks.count {
-                    let chunk = chunks[next]
-                    group.addTask {
-                        try await client.deleteObjects(bucket: bucket, keys: chunk)
-                    }
-                    next += 1
-                }
-            }
-        }
-
-        if let first = failures.first {
-            throw S3Error(
-                code: first.code,
-                message: "\(failures.count) of \(keys.count) objects could not be deleted. " +
-                    "\(first.key): \(first.message)"
-            )
         }
     }
 

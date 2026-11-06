@@ -1,7 +1,7 @@
 import Foundation
 
 /// Everything needed to address an S3 endpoint except credentials, which live in the Keychain.
-public struct ConnectionProfile: Identifiable, Codable, Hashable, Sendable {
+public struct ConnectionProfile: Identifiable, Hashable, Sendable {
     public var id: UUID
     public var name: String
     public var provider: ProviderKind
@@ -11,6 +11,13 @@ public struct ConnectionProfile: Identifiable, Codable, Hashable, Sendable {
     public var accountID: String
     public var pathStyle: Bool
 
+    // Non-S3 transport fields.  All are optional in JSON for backward-compat.
+    public var host: String
+    public var port: Int?
+    public var basePath: String
+    public var useTLS: Bool
+    public var privateKeyPath: String?
+
     public init(
         id: UUID = UUID(),
         name: String,
@@ -18,7 +25,12 @@ public struct ConnectionProfile: Identifiable, Codable, Hashable, Sendable {
         endpoint: String = "",
         region: String = "",
         accountID: String = "",
-        pathStyle: Bool? = nil
+        pathStyle: Bool? = nil,
+        host: String = "",
+        port: Int? = nil,
+        basePath: String = "",
+        useTLS: Bool = false,
+        privateKeyPath: String? = nil
     ) {
         self.id = id
         self.name = name
@@ -27,8 +39,52 @@ public struct ConnectionProfile: Identifiable, Codable, Hashable, Sendable {
         self.region = region.isEmpty ? provider.defaultRegion : region
         self.accountID = accountID
         self.pathStyle = pathStyle ?? provider.defaultPathStyle
+        self.host = host
+        self.port = port
+        self.basePath = basePath
+        self.useTLS = useTLS
+        self.privateKeyPath = privateKeyPath
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, name, provider, endpoint, region, accountID, pathStyle
+        case host, port, basePath, useTLS, privateKeyPath
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id         = try c.decode(UUID.self, forKey: .id)
+        name       = try c.decode(String.self, forKey: .name)
+        provider   = try c.decode(ProviderKind.self, forKey: .provider)
+        endpoint   = try c.decodeIfPresent(String.self, forKey: .endpoint) ?? ""
+        region     = try c.decodeIfPresent(String.self, forKey: .region) ?? ""
+        accountID  = try c.decodeIfPresent(String.self, forKey: .accountID) ?? ""
+        pathStyle  = try c.decodeIfPresent(Bool.self, forKey: .pathStyle) ?? provider.defaultPathStyle
+        host       = try c.decodeIfPresent(String.self, forKey: .host) ?? ""
+        port       = try c.decodeIfPresent(Int.self, forKey: .port)
+        basePath   = try c.decodeIfPresent(String.self, forKey: .basePath) ?? ""
+        useTLS     = try c.decodeIfPresent(Bool.self, forKey: .useTLS) ?? false
+        privateKeyPath = try c.decodeIfPresent(String.self, forKey: .privateKeyPath)
+    }
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(id, forKey: .id)
+        try c.encode(name, forKey: .name)
+        try c.encode(provider, forKey: .provider)
+        try c.encodeIfPresent(endpoint.isEmpty ? nil : endpoint, forKey: .endpoint)
+        try c.encodeIfPresent(region.isEmpty ? nil : region, forKey: .region)
+        try c.encodeIfPresent(accountID.isEmpty ? nil : accountID, forKey: .accountID)
+        try c.encode(pathStyle, forKey: .pathStyle)
+        try c.encodeIfPresent(host.isEmpty ? nil : host, forKey: .host)
+        try c.encodeIfPresent(port, forKey: .port)
+        try c.encodeIfPresent(basePath.isEmpty ? nil : basePath, forKey: .basePath)
+        try c.encodeIfPresent(useTLS ? true : nil, forKey: .useTLS)
+        try c.encodeIfPresent(privateKeyPath, forKey: .privateKeyPath)
     }
 }
+
+extension ConnectionProfile: Codable {}
 
 /// Secrets are stored as one generic-password item per profile UUID.
 public struct S3Credentials: Codable, Equatable, Sendable {

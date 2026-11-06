@@ -23,7 +23,7 @@ struct ObjectBrowserView: View {
             Divider()
             statusBar
         }
-        .navigationTitle(model.bucket)
+        .navigationTitle(model.containerName)
         .searchable(text: $model.searchText, placement: .toolbar, prompt: "Filter objects")
         .toolbar { toolbarContent }
         .fileImporter(
@@ -95,7 +95,7 @@ struct ObjectBrowserView: View {
                 Image(systemName: "shippingbox.fill")
                     .foregroundStyle(.tint)
                     .font(.title3)
-                Text(model.bucket)
+                Text(model.containerName)
                     .font(.system(.title2, design: .monospaced).weight(.semibold))
                     .lineLimit(1)
                     .truncationMode(.middle)
@@ -123,7 +123,7 @@ struct ObjectBrowserView: View {
                 Button {
                     Task { await model.navigate(to: "") }
                 } label: {
-                    Text(model.bucket)
+                    Text(model.containerName)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                 }
                 .buttonStyle(.plain)
@@ -266,8 +266,8 @@ struct ObjectBrowserView: View {
                         object,
                         to: url,
                         profile: model.profile,
-                        bucket: model.bucket,
-                        client: model.client,
+                        containerName: model.containerName,
+                        backend: model.backend,
                         completion: completion
                     )
                 },
@@ -367,7 +367,7 @@ struct ObjectBrowserView: View {
     @ViewBuilder
     private var stateView: some View {
         if model.isLoading {
-            LoadingOverlay(title: "Loading \(model.bucket)…")
+            LoadingOverlay(title: "Loading \(model.containerName)…")
         } else if let error = model.loadError {
             ContentUnavailableView {
                 Label("Couldn’t Load Objects", systemImage: "exclamationmark.triangle")
@@ -518,22 +518,22 @@ struct ObjectBrowserView: View {
             .disabled(model.isLoading)
             .help("Refresh this folder")
 
-            if model.profile.provider.showsBucketACLInfo {
+            if model.profile.provider.showsBucketACLInfo && model.backend.capabilities.supportsBuckets {
                 Button {
-                    app.beginBucketACL(model.bucket, profile: model.profile)
+                    app.beginBucketACL(model.containerName, profile: model.profile)
                 } label: {
                     Label("Access Control", systemImage: "lock.shield")
                 }
                 .help("Bucket access control")
-            }
 
-            Button(role: .destructive) {
-                app.requestDeleteBucket(model.bucket, profile: model.profile)
-            } label: {
-                Label("Delete Bucket", systemImage: "trash")
+                Button(role: .destructive) {
+                    app.requestDeleteBucket(model.containerName, profile: model.profile)
+                } label: {
+                    Label("Delete Bucket", systemImage: "trash")
+                }
+                .disabled(app.bucketOperationStatus != nil)
+                .help("Delete this bucket")
             }
-            .disabled(app.bucketOperationStatus != nil)
-            .help("Delete this bucket")
 
             Button {
                 app.transfers.togglePanel()
@@ -582,6 +582,6 @@ struct ObjectBrowserView: View {
         if hasFolders {
             return "Folders are deleted recursively, including every object inside them. This cannot be undone."
         }
-        return "This permanently deletes the selected objects from “\(model.bucket)”. This cannot be undone."
+        return "This permanently deletes the selected objects from “\(model.containerName)”. This cannot be undone."
     }
 }

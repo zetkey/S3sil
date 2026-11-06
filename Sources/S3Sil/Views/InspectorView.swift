@@ -79,7 +79,7 @@ struct InspectorView: View {
                 detail("ETag", object.etag.isEmpty ? "—" : object.etag, monospaced: true)
                 detail("Storage Class", object.storageClass ?? "STANDARD", monospaced: true)
             }
-            detail("Bucket", model.bucket, monospaced: true)
+            detail("Bucket", model.containerName, monospaced: true)
             detail("Profile", model.profile.name, monospaced: false)
         }
         .padding(13)
@@ -199,8 +199,12 @@ struct InspectorView: View {
         isPresigning = true
         defer { isPresigning = false }
         do {
-            let url = try await model.client.presignedURL(
-                bucket: model.bucket,
+            guard let s3 = model.backend as? S3BucketBackend else {
+                presignError = "Not available for this protocol."
+                return
+            }
+            let url = try await s3.client.presignedURL(
+                bucket: model.containerName,
                 key: object.key,
                 expires: expiry.rawValue
             )

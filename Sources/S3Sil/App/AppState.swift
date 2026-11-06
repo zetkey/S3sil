@@ -109,8 +109,13 @@ final class AppState {
         case .profile(let id):
             browserTask?.cancel()
             browser = nil
-            if profiles.contains(where: { $0.id == id }) {
+            guard let profile = profiles.first(where: { $0.id == id }) else { return }
+            if profile.provider == .aws || profile.provider == .cloudflareR2
+                || profile.provider == .hitachi || profile.provider == .minio
+                || profile.provider == .generic {
                 Task { await loadBuckets(for: id) }
+            } else {
+                openRoot(profile: profile)
             }
         case .bucket(let id, let name):
             guard let profile = profiles.first(where: { $0.id == id }) else { return }
@@ -125,11 +130,11 @@ final class AppState {
         browserTask?.cancel()
         browser = nil
         do {
-            let client = try client(for: profile)
+            let backend = try self.backend(for: profile, containerName: bucket)
             let model = ObjectBrowserModel(
                 profile: profile,
-                bucket: bucket,
-                client: client
+                containerName: bucket,
+                backend: backend
             ) { [weak self] error in
                 self?.present(error)
             }
@@ -139,6 +144,29 @@ final class AppState {
             present(error)
             if case .bucket = selection {
                 selection = .profile(profile.id)
+            }
+        }
+    }
+
+    /// Opens the browser at the root for non-S3 profiles (WebDAV, FTP, SFTP).
+    func openRoot(profile: ConnectionProfile) {
+        browserTask?.cancel()
+        browser = nil
+        do {
+            let backend = try self.backend(for: profile)
+            let model = ObjectBrowserModel(
+                profile: profile,
+                containerName: "",
+                backend: backend
+            ) { [weak self] error in
+                self?.present(error)
+            }
+            browser = model
+            browserTask = Task { await model.loadInitial() }
+        } catch {
+            present(error)
+            if case .profile = selection {
+                selection = nil
             }
         }
     }
@@ -253,7 +281,9 @@ final class AppState {
 
     // MARK: - Clients
 
-    func client(for profile: ConnectionProfile) throws -> S3Client {
+    /// Creates an S3Client for bucket-level operations (listBuckets, createBucket, deleteBucket, ACLs).
+    /// Only valid for S3 (or S3-compatible) profiles.
+    func s3Client(for profile: ConnectionProfile) throws -> S3Client {
         guard let credentials = try KeychainStore.load(profileID: profile.id) else {
             throw S3Error.validation("No credentials are stored for “\(profile.name)”. Edit the connection to add them.")
         }
@@ -261,6 +291,32 @@ final class AppState {
             throw S3Error.validation("The credentials for “\(profile.name)” are incomplete. Edit the connection.")
         }
         return try S3Client(profile: profile, credentials: credentials)
+    }
+
+    /// Legacy name; kept for callers that only need S3 operations.
+    func client(for profile: ConnectionProfile) throws -> S3Client {
+        try s3Client(for: profile)
+    }
+
+    /// Creates a StorageBackend for browsing objects in a given bucket/container.
+    func backend(for profile: ConnectionProfile, containerName: String) throws -> any StorageBackend {
+        let client = try s3Client(for: profile)
+        return S3BucketBackend(client: client, bucket: containerName)
+    }
+
+    /// Creates a StorageBackend for a non-S3 profile (WebDAV, FTP, SFTP).
+    func backend(for profile: ConnectionProfile) throws -> any StorageBackend {
+        let credentials = try KeychainStore.load(profileID: profile.id)
+        switch profile.provider {
+        case .webdav:
+            return try WebDAVBackend(profile: profile, credentials: credentials ?? S3Credentials(accessKeyID: "", secretAccessKey: ""))
+        case .ftp:
+            return FTPBackend(profile: profile, credentials: credentials ?? S3Credentials(accessKeyID: "", secretAccessKey: ""))
+        case .sftp:
+            return SFTPBackend(profile: profile, credentials: credentials ?? S3Credentials(accessKeyID: "", secretAccessKey: ""))
+        default:
+            throw S3Error.validation("“\(profile.name)” is an S3 profile. Select a bucket to browse.")
+        }
     }
 
     // MARK: - Connection editing
@@ -365,13 +421,21 @@ final class AppState {
         Task {
             defer { testingProfiles.remove(profile.id) }
             do {
-                let client = try client(for: profile)
-                let buckets = try await client.listBuckets()
-                bucketsByProfile[profile.id] = buckets.sorted {
-                    $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                switch profile.provider {
+                case .webdav, .ftp, .sftp:
+                    _ = try KeychainStore.load(profileID: profile.id)
+                    let backend = try self.backend(for: profile)
+                    _ = try await backend.list(prefix: "", maxKeys: 1)
+                    showToast("Connected to \(profile.name)")
+                default:
+                    let client = try s3Client(for: profile)
+                    let buckets = try await client.listBuckets()
+                    bucketsByProfile[profile.id] = buckets.sorted {
+                        $0.name.localizedStandardCompare($1.name) == .orderedAscending
+                    }
+                    bucketErrors[profile.id] = nil
+                    showToast("Connected to \(profile.name) — \(buckets.count) bucket\(buckets.count == 1 ? "" : "s")")
                 }
-                bucketErrors[profile.id] = nil
-                showToast("Connected to \(profile.name) — \(buckets.count) bucket\(buckets.count == 1 ? "" : "s")")
             } catch {
                 present(error)
             }
@@ -390,6 +454,7 @@ final class AppState {
     var canDelete: Bool { browser?.selectedObjects.isEmpty == false }
     var canNewFolder: Bool { browser != nil }
     var canCopyPresigned: Bool {
+        guard browser?.backend.capabilities.supportsPresignedURLs == true else { return false }
         guard let selected = browser?.selectedObjects else { return false }
         return selected.count == 1 && selected[0].isFolder == false
     }
@@ -418,8 +483,8 @@ final class AppState {
                 fileURL: file,
                 key: browser.prefix + file.lastPathComponent,
                 profile: browser.profile,
-                bucket: browser.bucket,
-                client: browser.client
+                containerName: browser.containerName,
+                backend: browser.backend
             )
         }
         if files.count == 1, let first = files.first {
@@ -454,9 +519,9 @@ final class AppState {
             transfers.enqueueDownload(
                 object: file,
                 profile: browser.profile,
-                bucket: browser.bucket,
+                containerName: browser.containerName,
                 destination: destination,
-                client: browser.client
+                backend: browser.backend
             )
         }
         showToast("Downloading \(files.count) files")
@@ -468,9 +533,9 @@ final class AppState {
         transfers.enqueueDownload(
             object: object,
             profile: browser.profile,
-            bucket: browser.bucket,
+            containerName: browser.containerName,
             destination: destination,
-            client: browser.client
+            backend: browser.backend
         )
         showToast("Downloading \(object.name)")
     }
@@ -481,8 +546,8 @@ final class AppState {
         _ object: S3Object,
         to destination: URL,
         profile: ConnectionProfile,
-        bucket: String,
-        client: S3Client,
+        containerName: String,
+        backend: any StorageBackend,
         completion: @escaping @Sendable (Result<Void, Error>) -> Void
     ) {
         guard !object.isFolder else {
@@ -492,9 +557,9 @@ final class AppState {
         transfers.enqueueDownload(
             object: object,
             profile: profile,
-            bucket: bucket,
+            containerName: containerName,
             destination: destination,
-            client: client,
+            backend: backend,
             completion: completion
         )
         showToast("Downloading \(object.name)")
@@ -502,13 +567,13 @@ final class AppState {
 
     func copyPresignedURL(for object: S3Object, expires: Int) {
         guard let browser, !object.isFolder else { return }
+        guard let s3Backend = browser.backend as? S3BucketBackend else {
+            showToast("Presigned URLs are only available for S3 connections.")
+            return
+        }
         Task {
             do {
-                let url = try await browser.client.presignedURL(
-                    bucket: browser.bucket,
-                    key: object.key,
-                    expires: expires
-                )
+                let url = try await s3Backend.presignedURL(key: object.key, expires: expires)
                 FilePanels.copy(url.absoluteString)
                 showToast("Presigned URL copied")
             } catch {
@@ -543,8 +608,17 @@ final class AppState {
     private func handleUploadCompleted(_ item: TransferManager.Item) {
         guard let browser,
               item.profileID == browser.profile.id,
-              item.bucket == browser.bucket,
+              item.containerName == browser.containerName,
               item.key.hasPrefix(browser.prefix) else { return }
         Task { await browser.refreshAfterChange() }
+    }
+
+    // Checks if the selected profile is S3-based (has buckets).
+    var isS3Profile: Bool {
+        guard let profile = selectedProfile else { return false }
+        switch profile.provider {
+        case .aws, .cloudflareR2, .hitachi, .minio, .generic: return true
+        default: return false
+        }
     }
 }

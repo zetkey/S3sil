@@ -32,7 +32,7 @@ struct SidebarView: View {
                 }
             }
 
-            if let profile = app.selectedProfile {
+            if let profile = app.selectedProfile, [.aws, .cloudflareR2, .hitachi, .minio, .generic].contains(profile.provider) {
                 Section("Buckets") {
                     let buckets = app.bucketsByProfile[profile.id] ?? []
                     if app.loadingBuckets.contains(profile.id), buckets.isEmpty {
@@ -166,9 +166,15 @@ struct SidebarView: View {
     }
 
     private func endpointSummary(_ profile: ConnectionProfile) -> String {
-        let endpoint = EndpointResolver.displayEndpoint(for: profile)
-        let addressing = (try? EndpointResolver.resolve(profile: profile))?.addressingDescription.lowercased()
-            ?? (profile.pathStyle ? "path-style" : "virtual-hosted")
-        return "\(profile.provider.shortName) · \(addressing) · \(endpoint)"
+        switch profile.provider {
+        case .webdav, .ftp, .sftp:
+            let host = profile.host.isEmpty ? "Not configured" : profile.host
+            return "\(profile.provider.shortName) · \(host)"
+        default:
+            let endpoint = EndpointResolver.displayEndpoint(for: profile)
+            let addressing = (try? EndpointResolver.resolve(profile: profile))?.addressingDescription.lowercased()
+                ?? (profile.pathStyle ? "path-style" : "virtual-hosted")
+            return "\(profile.provider.shortName) · \(addressing) · \(endpoint)"
+        }
     }
 }

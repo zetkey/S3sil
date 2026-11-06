@@ -233,3 +233,95 @@ func malformedXML() {
         try S3XML.parse(Data("<ListBucketResult><Contents>".utf8))
     }
 }
+
+// MARK: - RemoteListingParser tests
+
+@Test("MLSD dir entry parses")
+func mlsdDir() {
+    let line = "type=dir;size=0;modify=20250101120000; dirname"
+    let entry = RemoteListingParser.parseMLSDLine(line)
+    #expect(entry != nil)
+    if let entry {
+        #expect(entry.isDirectory == true)
+        #expect(entry.name == "dirname")
+        #expect(entry.size == 0)
+    }
+}
+
+@Test("MLSD file entry parses")
+func mlsdFile() {
+    let line = "type=file;size=12345;modify=20250101120000; filename.txt"
+    let entry = RemoteListingParser.parseMLSDLine(line)
+    #expect(entry != nil)
+    if let entry {
+        #expect(entry.isDirectory == false)
+        #expect(entry.name == "filename.txt")
+        #expect(entry.size == 12345)
+    }
+}
+
+@Test("Unix ls -l file parses")
+func unixFile() {
+    let entry = RemoteListingParser.parseUnixLine("-rw-r--r--  1 user group  12345 Jan 01 12:00 filename.txt")
+    #expect(entry != nil)
+    if let entry {
+        #expect(entry.isDirectory == false)
+        #expect(entry.name == "filename.txt")
+        #expect(entry.size == 12345)
+    }
+}
+
+@Test("Unix ls -l directory parses")
+func unixDir() {
+    let entry = RemoteListingParser.parseUnixLine("drwxr-xr-x  2 user group  4096 Jan 01 12:00 dirname")
+    #expect(entry != nil)
+    if let entry {
+        #expect(entry.isDirectory == true)
+        #expect(entry.name == "dirname")
+    }
+}
+
+@Test("DOS dir entry parses")
+func dosDir() {
+    let entry = RemoteListingParser.parseDOSLine("01-01-23  12:00PM       <DIR>          dirname")
+    #expect(entry != nil)
+    if let entry {
+        #expect(entry.isDirectory == true)
+        #expect(entry.name == "dirname")
+    }
+}
+
+@Test("DOS file entry parses")
+func dosFile() {
+    let entry = RemoteListingParser.parseDOSLine("01-01-23  12:00PM            12345 filename.txt")
+    #expect(entry != nil)
+    if let entry {
+        #expect(entry.isDirectory == false)
+        #expect(entry.name == "filename.txt")
+        #expect(entry.size == 12345)
+    }
+}
+
+@Test("RemoteListingParser auto-detects MLSD from mixed lines")
+func parserAutoMLSD() {
+    let listing = "type=file;size=100;modify=20250101120000; a.txt\ntype=dir;size=0;modify=20250101120000; b"
+    let entries = RemoteListingParser.parse(listing: listing)
+    #expect(entries.count == 2)
+    #expect(entries[0].isDirectory == false)
+    #expect(entries[1].isDirectory == true)
+}
+
+@Test("RemoteListingParser auto-detects Unix from mixed lines")
+func parserAutoUnix() {
+    let listing = "-rw-r--r--  1 user group  100 Jan 01 12:00 a.txt\ndrwxr-xr-x  2 user group  4096 Jan 01 12:00 b"
+    let entries = RemoteListingParser.parse(listing: listing)
+    #expect(entries.count == 2)
+    #expect(entries[0].isDirectory == false)
+    #expect(entries[1].isDirectory == true)
+}
+
+@Test("RemoteListingParser handles empty listing")
+func parserEmpty() {
+    let entries = RemoteListingParser.parse(listing: "")
+    #expect(entries.isEmpty)
+}

@@ -1,6 +1,6 @@
 # S3Sil
 
-S3Sil is a native macOS S3 browser for Apple Silicon. It implements AWS Signature Version 4 directly (Swift, SwiftUI, CryptoKit — no third-party dependencies, no web views, no telemetry) and works with AWS S3, Cloudflare R2, Hitachi HCP/Vantara S3, MinIO, and generic S3-compatible endpoints such as Backblaze B2, Wasabi, DigitalOcean Spaces, Linode, Scaleway, Ceph, and Garage.
+S3Sil is a native macOS file browser for S3, WebDAV, FTP, FTPS, and SFTP. It implements AWS Signature Version 4 directly (Swift, SwiftUI, CryptoKit — no third-party dependencies, no web views, no telemetry) and works with AWS S3, Cloudflare R2, Hitachi HCP/Vantara S3, MinIO, and generic S3-compatible endpoints such as Backblaze B2, Wasabi, DigitalOcean Spaces, Linode, Scaleway, Ceph, and Garage. The WebDAV, FTP, and SFTP backends use system tools (URLSession, curl, and sftp) so no additional packages are needed.
 
 ## Features
 
@@ -45,7 +45,25 @@ Click **Add Connection** in the sidebar or press Command-N. Every profile has an
 
 Endpoints without a scheme default to `https://`, except MinIO (`http://`). A base path in the endpoint is supported. Buckets with dotted names automatically use path-style addressing for transport, signing, and presigned URLs, because TLS wildcard certificates do not match dotted hostnames.
 
-**Test Connection** runs a signed `ListBuckets` request and reports the result inside the editor.
+### WebDAV / FTP / SFTP
+
+Protocol support is selected with the picker in the connection editor. S3 features (bucket creation/deletion, ACLs, presigned URLs, multipart uploads, storage class columns) are hidden for non-S3 connections.
+
+**WebDAV** (HTTP/HTTPS, Basic auth): enter the server URL (e.g. `https://webdav.example.com/remote.php/dav`), username, password, and an optional base path. Rely on URLSession and `PROPFIND` / `GET` / `PUT` / `DELETE` / `MKCOL`. Progress tracking works for both uploads and downloads.
+
+**FTP / FTPS** (explicit and implicit TLS): enter host, port (default 21 / 990 for FTPS), username, password, TLS toggle, and base path. Operations use `/usr/bin/curl` (already on every Mac). LIST parsing handles MLSD, Unix `ls -l`, and DOS `dir` formats. Download progress is tracked by polling the destination file; upload progress reports only at completion.
+
+**SFTP** (SSH File Transfer Protocol): enter host, port (default 22), username, password (or private key file), and base path. Key-only, password-only, and key+passphrase auth are supported. Operations use `/usr/bin/sftp` in batch mode with `SSH_ASKPASS` for password/passphrase entry. Host keys are trusted on first use (TOFU) via an app-owned `known_hosts` file. Download progress is tracked by polling; upload progress reports only at completion.
+
+**Test Connection** runs `ListBuckets` for S3 and a root-directory list for WebDAV/FTP/SFTP, then reports the result inside the editor.
+
+## Non-S3 connection fields
+
+| Protocol | Required | Optional |
+|---|---|---|
+| WebDAV | endpoint (full URL), username, password | base path |
+| FTP | host, username, password | port (21), TLS toggle, base path |
+| SFTP | host, username, password **or** private key | port (22), base path |
 
 ## Notes
 
@@ -72,7 +90,7 @@ Shortcuts: Command-N new connection, Command-U upload, Command-D download, Shift
 swift test
 ```
 
-Current result: **45 tests in 2 suites, all passing** (Swift Testing), covering the official AWS SigV4 test vectors, presigned URLs, endpoint resolution, S3 XML parsing, listing dedupe, multipart sizing, provider ACL gating, and profile storage.
+Current result: **55 tests in 2 suites, all passing** (Swift Testing), covering the official AWS SigV4 test vectors, presigned URLs, endpoint resolution, S3 XML parsing, listing dedupe, multipart sizing, provider ACL gating, profile storage, backward-compatible connection decoding, and FTP/MLSD/Unix/DOS listing parsers.
 
 An end-to-end smoke run against a local MinIO exercises bucket create/delete, object upload (including a multipart round-trip with byte-for-byte comparison), listings with pagination, presigned downloads, and batched deletes:
 
@@ -88,16 +106,22 @@ MINIO_REGION=us-east-1 \
 
 - Object ACLs, grant-by-grant editing, bucket policies, versioning, and object lock are not exposed — bucket lifecycle and canned bucket ACLs only.
 - MinIO bucket ACLs are read-only (emulated APIs); R2 has no ACL UI at all.
+- WebDAV, FTP, and SFTP have no bucket concept; S3-only features (ACL editor, presigned URLs, multipart labels, bucket creation/deletion) are hidden for non-S3 profiles.
+- FTP uploads and SFTP uploads show progress at completion only; FTP/SFTP downloads poll the destination file for progress (coarse granularity). WebDAV uploads/downloads have full progress via URLSession.
+- SFTP uses password or private-key auth via `/usr/bin/sftp` with `SSH_ASKPASS`. Host keys are accepted on first use (TOFU) and stored in the app's data directory — no revocation or fingerprint verification UI.
+- FTP uses `/usr/bin/curl`; passive mode and explicit/implicit TLS are handled by curl. Firewall-restricted active-mode servers are not supported.
+- WebDAV uses Basic auth only (no Digest, OAuth, or Kerberos). Self-signed certificates are not specifically handled (relies on macOS trust evaluation).
 - Delete bucket requires an empty bucket.
 - The app is ad-hoc signed, so macOS may re-prompt for Keychain access after a rebuild; a Developer ID certificate avoids this.
 - Drag-out locates SwiftUI `Table`'s backing `NSTableView` and may need revisiting if macOS internals change ([`docs/drag-drop-research.md`](docs/drag-drop-research.md)).
 - ACL behavior has been exercised against MinIO only; the AWS, R2, and Hitachi ACL paths are covered by unit tests and runtime error handling, not live endpoint tests.
+- WebDAV, FTP, and SFTP backends have not been exercised against real servers in this test run; they are compile-tested and unit-tested (listing parsers) only.
 
 ## Project layout
 
 | Path | Contents |
 | --- | --- |
-| `Sources/S3SilKit` | Provider models, SigV4, endpoint resolution, XML parsing, async `S3Client`, Keychain and profile storage. |
+| `Sources/S3SilKit` | Models (`StorageBackend`, `StorageCapabilities`, `S3BucketBackend`), S3 networking (SigV4, XML parsing, async `S3Client`), WebDAV/FTP/SFTP backends, listing parsers, Keychain and profile storage. |
 | `Sources/S3Sil` | The SwiftUI app: views, state, transfer manager, commands. |
 | `Sources/S3SilSmoke` | End-to-end smoke harness (`scripts/smoke-minio.sh`). |
 | `Tests/S3SilKitTests` | Swift Testing suite with SigV4 fixtures. |

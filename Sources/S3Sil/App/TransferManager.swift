@@ -23,18 +23,21 @@ final class TransferManager {
         let direction: Direction
         let profileID: UUID
         let profileName: String
-        let bucket: String
+        let containerName: String
         let key: String
         let displayName: String
         let sourceURL: URL?
         let destinationURL: URL?
-        let client: S3Client
+        let backend: any StorageBackend
         var status: Status
         var progress: Double
         var bytesTransferred: Int64
         var totalBytes: Int64
         var errorMessage: String?
+        /// Non-nil for S3 uploads that use multipart.
         var multipartLabel: String? = nil
+        /// The bucket or profile name for display in the queue.
+        var locationLabel: String { containerName.isEmpty ? profileName : containerName }
     }
 
     private(set) var items: [Item] = []
@@ -91,46 +94,49 @@ final class TransferManager {
     }
 
     func enqueueUpload(fileURL: URL, key: String, profile: ConnectionProfile,
-                       bucket: String, client: S3Client) {
+                       containerName: String, backend: any StorageBackend) {
         let size = (try? fileURL.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-        let multipartLabel = MultipartUploadPlan.plan(totalBytes: Int64(size)).map {
-            "Multipart · \($0.partCount) parts"
+        let mpLabel: String?
+        if let plan = MultipartUploadPlan.plan(totalBytes: Int64(size)) {
+            mpLabel = "Multipart · \(plan.partCount) parts"
+        } else {
+            mpLabel = nil
         }
         let item = Item(
             id: UUID(),
             direction: .upload,
             profileID: profile.id,
             profileName: profile.name,
-            bucket: bucket,
+            containerName: containerName,
             key: key,
             displayName: fileURL.lastPathComponent,
             sourceURL: fileURL,
             destinationURL: nil,
-            client: client,
+            backend: backend,
             status: .queued,
             progress: 0,
             bytesTransferred: 0,
             totalBytes: Int64(size),
             errorMessage: nil,
-            multipartLabel: multipartLabel
+            multipartLabel: mpLabel
         )
         insert(item)
     }
 
     func enqueueDownload(object: S3Object, profile: ConnectionProfile,
-                         bucket: String, destination: URL, client: S3Client,
+                         containerName: String, destination: URL, backend: any StorageBackend,
                          completion: (@Sendable (Result<Void, Error>) -> Void)? = nil) {
         let item = Item(
             id: UUID(),
             direction: .download,
             profileID: profile.id,
             profileName: profile.name,
-            bucket: bucket,
+            containerName: containerName,
             key: object.key,
             displayName: object.name,
             sourceURL: nil,
             destinationURL: destination,
-            client: client,
+            backend: backend,
             status: .queued,
             progress: 0,
             bytesTransferred: 0,
@@ -218,9 +224,8 @@ final class TransferManager {
                     guard let source = item.sourceURL else {
                         throw S3Error.validation("The source file is missing.")
                     }
-                    try await item.client.uploadFile(
+                    try await item.backend.upload(
                         fileURL: source,
-                        bucket: item.bucket,
                         key: item.key
                     ) { sent, total in
                         Task { @MainActor [weak manager] in
@@ -231,8 +236,7 @@ final class TransferManager {
                     guard let destination = item.destinationURL else {
                         throw S3Error.validation("The download destination is missing.")
                     }
-                    try await item.client.download(
-                        bucket: item.bucket,
+                    try await item.backend.download(
                         key: item.key,
                         to: destination
                     ) { received, total in

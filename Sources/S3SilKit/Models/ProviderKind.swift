@@ -16,6 +16,9 @@ public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable 
     case hitachi
     case minio
     case generic
+    case webdav
+    case ftp
+    case sftp
 
     public var id: String { rawValue }
 
@@ -26,6 +29,9 @@ public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable 
         case .hitachi: return "Hitachi HCP / Vantara"
         case .minio: return "MinIO"
         case .generic: return "S3-Compatible"
+        case .webdav: return "WebDAV"
+        case .ftp: return "FTP"
+        case .sftp: return "SFTP"
         }
     }
 
@@ -36,18 +42,26 @@ public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable 
         case .hitachi: return "Hitachi"
         case .minio: return "MinIO"
         case .generic: return "Custom"
+        case .webdav: return "WebDAV"
+        case .ftp: return "FTP"
+        case .sftp: return "SFTP"
         }
     }
 
     public var defaultRegion: String {
         switch self {
         case .cloudflareR2: return "auto"
+        case .webdav, .ftp, .sftp: return ""
         default: return "us-east-1"
         }
     }
 
     public var defaultPathStyle: Bool {
-        self != .aws
+        switch self {
+        case .aws: return false
+        case .webdav, .ftp, .sftp: return false
+        default: return true
+        }
     }
 
     public var requiresEndpoint: Bool {
@@ -58,7 +72,13 @@ public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable 
     }
 
     public var defaultScheme: String {
-        self == .minio ? "http" : "https"
+        switch self {
+        case .minio: return "http"
+        case .webdav: return "https"
+        case .ftp: return "ftp"
+        case .sftp: return ""
+        default: return "https"
+        }
     }
 
     /// How bucket ACLs behave for this provider. R2 has none; MinIO emulates them
@@ -72,6 +92,8 @@ public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable 
                 "MinIO reports bucket ACLs but does not enforce them. GET returns a constant stub, " +
                 "PUT private is a no-op, and other canned ACLs are not implemented. Use bucket policies instead."
             )
+        case .webdav, .ftp, .sftp:
+            return .unsupported("\(displayName) does not support S3 bucket ACLs.")
         default:
             return .editable
         }
@@ -105,6 +127,9 @@ public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable 
         case .hitachi: return "building.2.fill"
         case .minio: return "externaldrive.connected.to.line.below"
         case .generic: return "server.rack"
+        case .webdav: return "globe"
+        case .ftp: return "arrow.triangle.swap"
+        case .sftp: return "terminal"
         }
     }
 
@@ -115,6 +140,9 @@ public enum ProviderKind: String, Codable, CaseIterable, Identifiable, Sendable 
         case .hitachi: return "https://s3.example.com"
         case .minio: return "http://127.0.0.1:9000"
         case .generic: return "https://s3.example.com"
+        case .webdav: return "https://webdav.example.com"
+        case .ftp: return "ftp.example.com"
+        case .sftp: return "sftp.example.com"
         }
     }
 }

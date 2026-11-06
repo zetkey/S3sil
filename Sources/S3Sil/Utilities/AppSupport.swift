@@ -114,6 +114,9 @@ extension ProviderKind {
         case .hitachi: return .red
         case .minio: return .pink
         case .generic: return .teal
+        case .webdav: return .blue
+        case .ftp: return .yellow
+        case .sftp: return .green
         }
     }
 }

@@ -2,6 +2,66 @@ import AppKit
 import SwiftUI
 import S3SilKit
 
+// MARK: - Protocol group
+
+private enum ProtocolGroup: String, CaseIterable, Identifiable {
+    case s3
+    case webdav
+    case ftp
+    case sftp
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .s3:      return "S3"
+        case .webdav:  return "WebDAV"
+        case .ftp:     return "FTP"
+        case .sftp:    return "SFTP"
+        }
+    }
+
+    var symbolName: String {
+        switch self {
+        case .s3:      return "externaldrive.connected.to.line.below"
+        case .webdav:  return "globe"
+        case .ftp:     return "arrow.triangle.swap"
+        case .sftp:    return "terminal"
+        }
+    }
+
+    var tint: Color {
+        switch self {
+        case .s3:      return .orange
+        case .webdav:  return .blue
+        case .ftp:     return .yellow
+        case .sftp:    return .green
+        }
+    }
+
+    /// The ProviderKind this group locks to (nil for S3, where the user picks).
+    var providerKind: ProviderKind? {
+        switch self {
+        case .s3:      return nil
+        case .webdav:  return .webdav
+        case .ftp:     return .ftp
+        case .sftp:    return .sftp
+        }
+    }
+
+    /// Which S3 ProviderKind to restore when switching back to .s3.
+    static func restoreS3Provider(from provider: ProviderKind) -> ProviderKind {
+        switch provider {
+        case .aws, .cloudflareR2, .hitachi, .minio, .generic:
+            return provider
+        default:
+            return .aws
+        }
+    }
+}
+
+// MARK: - ConnectionEditorView
+
 struct ConnectionEditorView: View {
     private enum TestState: Equatable {
         case idle
@@ -14,48 +74,91 @@ struct ConnectionEditorView: View {
     let target: ConnectionEditorTarget
     let onSave: (ConnectionProfile, S3Credentials) throws -> Void
 
-    @State private var profileID: UUID
-    @State private var name: String
+    // Protocol
+    @State private var protocolGroup: ProtocolGroup
+    @State private var lastS3Provider: ProviderKind
+
+    // S3 fields
     @State private var provider: ProviderKind
     @State private var endpoint: String
     @State private var region: String
     @State private var accountID: String
     @State private var pathStyle: Bool
-    @State private var accessKey: String
-    @State private var secretKey: String
+
+    // Non-S3 fields
+    @State private var host: String
+    @State private var portString: String
+    @State private var basePath: String
+    @State private var useTLS: Bool
+    @State private var privateKeyPath: String?
+
+    // Common
+    @State private var name: String
+    @State private var username: String
+    @State private var password: String
     @State private var sessionToken: String
     @State private var revealSecrets = false
+
+    // Sheet state
     @State private var errors: [String: String] = [:]
     @State private var saveError: String?
     @State private var testState: TestState = .idle
     @State private var testTask: Task<Void, Never>?
+
+    private let profileID: UUID
+
+    // MARK: - Init
 
     init(target: ConnectionEditorTarget,
          onSave: @escaping (ConnectionProfile, S3Credentials) throws -> Void) {
         self.target = target
         self.onSave = onSave
 
-        let profile: ConnectionProfile?
-        let credentials: S3Credentials?
+        let editProfile: ConnectionProfile?
+        let editCreds: S3Credentials?
         switch target {
         case .new:
-            profile = nil
-            credentials = nil
+            editProfile = nil
+            editCreds = nil
         case .edit(let value, let creds):
-            profile = value
-            credentials = creds
+            editProfile = value
+            editCreds = creds
         }
 
-        _profileID = State(initialValue: profile?.id ?? UUID())
-        _name = State(initialValue: profile?.name ?? "")
-        _provider = State(initialValue: profile?.provider ?? .aws)
-        _endpoint = State(initialValue: profile?.endpoint ?? "")
-        _region = State(initialValue: profile?.region ?? ProviderKind.aws.defaultRegion)
-        _accountID = State(initialValue: profile?.accountID ?? "")
-        _pathStyle = State(initialValue: profile?.pathStyle ?? ProviderKind.aws.defaultPathStyle)
-        _accessKey = State(initialValue: credentials?.accessKeyID ?? "")
-        _secretKey = State(initialValue: credentials?.secretAccessKey ?? "")
-        _sessionToken = State(initialValue: credentials?.sessionToken ?? "")
+        let p = editProfile
+        profileID = p?.id ?? UUID()
+
+        // Determine protocol group from the profile’s provider
+        let pg: ProtocolGroup
+        if let pk = p?.provider {
+            switch pk {
+            case .webdav: pg = .webdav
+            case .ftp:    pg = .ftp
+            case .sftp:   pg = .sftp
+            default:      pg = .s3
+            }
+        } else {
+            pg = .s3
+        }
+        _protocolGroup = State(initialValue: pg)
+        _lastS3Provider = State(initialValue: ProtocolGroup.restoreS3Provider(from: p?.provider ?? .aws))
+
+        _name = State(initialValue: p?.name ?? "")
+        _provider = State(initialValue: pg == .s3 ? (p?.provider ?? .aws) : .aws)
+        _endpoint = State(initialValue: p?.endpoint ?? "")
+        _region = State(initialValue: p?.region ?? ProviderKind.aws.defaultRegion)
+        _accountID = State(initialValue: p?.accountID ?? "")
+        _pathStyle = State(initialValue: p?.pathStyle ?? ProviderKind.aws.defaultPathStyle)
+
+        _host = State(initialValue: p?.host ?? "")
+        _portString = State(initialValue: p?.port.map(String.init) ?? "")
+        _basePath = State(initialValue: p?.basePath ?? "")
+        _useTLS = State(initialValue: p?.useTLS ?? false)
+        _privateKeyPath = State(initialValue: p?.privateKeyPath)
+
+        _username = State(initialValue: editCreds?.accessKeyID ?? "")
+        _password = State(initialValue: editCreds?.secretAccessKey ?? "")
+        _sessionToken = State(initialValue: editCreds?.sessionToken ?? "")
     }
 
     private var isEditing: Bool {
@@ -63,13 +166,34 @@ struct ConnectionEditorView: View {
         return false
     }
 
+    // MARK: - Derived values
+
+    private var effectiveProvider: ProviderKind {
+        protocolGroup.providerKind ?? provider
+    }
+
+    private var portValue: Int? {
+        let trimmed = portString.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : Int(trimmed)
+    }
+
+    private var defaultPort: Int {
+        switch protocolGroup {
+        case .ftp:  return useTLS ? 990 : 21
+        case .sftp: return 22
+        default:    return 0
+        }
+    }
+
+    // MARK: - Body
+
     var body: some View {
         VStack(spacing: 0) {
             sheetHeader
             Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    providerSection
+                    protocolSection
                     connectionSection
                     credentialsSection
                     if let saveError {
@@ -85,17 +209,22 @@ struct ConnectionEditorView: View {
             footer
         }
         .frame(width: 600, height: 700)
-        .onChange(of: provider) { _, newProvider in
-            applyPreset(newProvider)
+        .onChange(of: protocolGroup) { _, newGroup in
+            applyProtocolGroup(newGroup)
+        }
+        .onChange(of: provider) { _, _ in
+            testState = .idle
         }
         .onDisappear {
             testTask?.cancel()
         }
     }
 
+    // MARK: - Header
+
     private var sheetHeader: some View {
         HStack(spacing: 12) {
-            ProviderBadge(provider: provider, size: 40)
+            protocolBadge
             VStack(alignment: .leading, spacing: 2) {
                 Text(isEditing ? "Edit Connection" : "New Connection")
                     .font(.title3.weight(.semibold))
@@ -109,15 +238,47 @@ struct ConnectionEditorView: View {
         .padding(.vertical, 14)
     }
 
-    private var providerSection: some View {
-        EditorSection(title: "Provider", icon: "square.grid.2x2") {
-            LazyVGrid(
-                columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
-                spacing: 8
-            ) {
-                ForEach(ProviderKind.allCases) { kind in
+    private var protocolBadge: some View {
+        Image(systemName: protocolGroup.symbolName)
+            .font(.system(size: 19, weight: .semibold))
+            .foregroundStyle(.white)
+            .frame(width: 40, height: 40)
+            .background(protocolGroup.tint.gradient, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+            .help(protocolGroup.displayName)
+    }
+
+    // MARK: - Protocol section
+
+    private var protocolSection: some View {
+        EditorSection(title: "Protocol", icon: "square.grid.2x2") {
+            // Segmented picker
+            Picker("Protocol", selection: $protocolGroup) {
+                ForEach(ProtocolGroup.allCases) { pg in
+                    Label(pg.displayName, systemImage: pg.symbolName)
+                        .tag(pg)
+                }
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+
+            // S3 provider grid — only when S3
+            if protocolGroup == .s3 {
+                s3ProviderGrid
+            }
+        }
+    }
+
+    private var s3ProviderGrid: some View {
+        LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: 3),
+            spacing: 8
+        ) {
+            ForEach(ProviderKind.allCases) { kind in
+                // Show only S3-flavoured providers
+                if kind.isS3Variant {
                     Button {
                         provider = kind
+                        applyPreset(kind)
                     } label: {
                         VStack(spacing: 6) {
                             Image(systemName: kind.symbolName)
@@ -149,8 +310,11 @@ struct ConnectionEditorView: View {
         }
     }
 
+    // MARK: - Connection section
+
     private var connectionSection: some View {
         EditorSection(title: "Connection", icon: "network") {
+            // Name — always
             LabeledField(
                 title: "Name",
                 prompt: "e.g. Production Assets",
@@ -159,82 +323,239 @@ struct ConnectionEditorView: View {
                 error: errors["name"]
             )
 
-            if provider == .cloudflareR2 {
-                LabeledField(
-                    title: "Account ID",
-                    prompt: "Cloudflare account ID",
-                    text: $accountID,
-                    monospaced: true,
-                    error: errors["account"]
-                )
+            switch protocolGroup {
+            case .s3:
+                s3ConnectionFields
+            case .webdav:
+                webdavConnectionFields
+            case .ftp:
+                ftpConnectionFields
+            case .sftp:
+                sftpConnectionFields
             }
-
-            LabeledField(
-                title: "Endpoint",
-                prompt: provider.endpointPlaceholder,
-                text: $endpoint,
-                monospaced: true,
-                error: errors["endpoint"]
-            )
-            Text(endpointCaption)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-
-            HStack(alignment: .bottom, spacing: 12) {
-                LabeledField(
-                    title: provider == .cloudflareR2 ? "Region (auto)" : "Region",
-                    prompt: "us-east-1",
-                    text: $region,
-                    monospaced: true,
-                    error: errors["region"],
-                    disabled: provider == .cloudflareR2
-                )
-
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Addressing")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-                    Toggle("Path-style requests", isOn: $pathStyle)
-                        .toggleStyle(.switch)
-                        .controlSize(.small)
-                        .disabled(provider == .cloudflareR2)
-                }
-                .padding(.bottom, 3)
-            }
-            Text(addressingCaption)
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
         }
     }
+
+    // --- S3 connection fields ---
+
+    @ViewBuilder
+    private var s3ConnectionFields: some View {
+        if provider == .cloudflareR2 {
+            LabeledField(
+                title: "Account ID",
+                prompt: "Cloudflare account ID",
+                text: $accountID,
+                monospaced: true,
+                error: errors["account"]
+            )
+        }
+
+        LabeledField(
+            title: "Endpoint",
+            prompt: provider.endpointPlaceholder,
+            text: $endpoint,
+            monospaced: true,
+            error: errors["endpoint"]
+        )
+        Text(endpointCaption)
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+
+        HStack(alignment: .bottom, spacing: 12) {
+            LabeledField(
+                title: provider == .cloudflareR2 ? "Region (auto)" : "Region",
+                prompt: "us-east-1",
+                text: $region,
+                monospaced: true,
+                error: errors["region"],
+                disabled: provider == .cloudflareR2
+            )
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Addressing")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Toggle("Path-style requests", isOn: $pathStyle)
+                    .toggleStyle(.switch)
+                    .controlSize(.small)
+                    .disabled(provider == .cloudflareR2)
+            }
+            .padding(.bottom, 3)
+        }
+        Text(addressingCaption)
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+    }
+
+    // --- WebDAV connection fields ---
+
+    @ViewBuilder
+    private var webdavConnectionFields: some View {
+        LabeledField(
+            title: "Endpoint URL",
+            prompt: "https://webdav.example.com",
+            text: $endpoint,
+            monospaced: true,
+            error: errors["endpoint"]
+        )
+        Text("Full WebDAV server URL, e.g. https://webdav.example.com/remote.php/dav/.")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+
+        LabeledField(
+            title: "Base Path",
+            prompt: "/remote.php/dav/files/username/",
+            text: $basePath,
+            monospaced: true,
+            error: nil
+        )
+        Text("Optional — a subfolder shown as the root in the browser.")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+    }
+
+    // --- FTP connection fields ---
+
+    @ViewBuilder
+    private var ftpConnectionFields: some View {
+        HStack(alignment: .bottom, spacing: 12) {
+            LabeledField(
+                title: "Host",
+                prompt: "ftp.example.com",
+                text: $host,
+                monospaced: true,
+                error: errors["host"]
+            )
+
+            LabeledField(
+                title: "Port",
+                prompt: "\(defaultPort)",
+                text: $portString,
+                monospaced: true,
+                error: nil
+            )
+        }
+
+        Toggle("Use TLS (FTPS)", isOn: $useTLS)
+            .toggleStyle(.switch)
+            .controlSize(.small)
+            .onChange(of: useTLS) { _, _ in
+                if portString.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    portString = String(defaultPort)
+                }
+            }
+
+        LabeledField(
+            title: "Base Path",
+            prompt: "/public_html/",
+            text: $basePath,
+            monospaced: true,
+            error: nil
+        )
+        Text("Optional — a subfolder shown as the root in the browser.")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+    }
+
+    // --- SFTP connection fields ---
+
+    @ViewBuilder
+    private var sftpConnectionFields: some View {
+        HStack(alignment: .bottom, spacing: 12) {
+            LabeledField(
+                title: "Host",
+                prompt: "sftp.example.com",
+                text: $host,
+                monospaced: true,
+                error: errors["host"]
+            )
+
+            LabeledField(
+                title: "Port",
+                prompt: "\(defaultPort)",
+                text: $portString,
+                monospaced: true,
+                error: nil
+            )
+        }
+
+        LabeledField(
+            title: "Base Path",
+            prompt: "/home/user/files",
+            text: $basePath,
+            monospaced: true,
+            error: nil
+        )
+        Text("Optional — a subfolder shown as the root in the browser.")
+            .font(.caption2)
+            .foregroundStyle(.tertiary)
+
+        HStack(alignment: .bottom) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Private Key")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text(privateKeyPath ?? "None selected")
+                    .font(.system(.caption, design: .monospaced))
+                    .foregroundStyle(privateKeyPath == nil ? .tertiary : .primary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+            }
+            Spacer()
+            Button("Choose…") {
+                choosePrivateKey()
+            }
+            .controlSize(.small)
+            if privateKeyPath != nil {
+                Button {
+                    privateKeyPath = nil
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                }
+                .buttonStyle(.borderless)
+                .help("Clear key")
+            }
+        }
+    }
+
+    // MARK: - Credentials section
 
     private var credentialsSection: some View {
         EditorSection(title: "Credentials", icon: "key") {
             LabeledField(
-                title: "Access Key ID",
-                prompt: "AKIA…",
-                text: $accessKey,
+                title: protocolGroup == .s3 ? "Access Key ID" : "Username",
+                prompt: protocolGroup == .s3 ? "AKIA…" : "user@example.com",
+                text: $username,
                 monospaced: true,
                 error: errors["access"]
             )
+
             SecretField(
-                title: "Secret Access Key",
-                prompt: "Secret access key",
-                text: $secretKey,
+                title: protocolGroup == .s3 ? "Secret Access Key" : "Password",
+                prompt: protocolGroup == .s3 ? "Secret access key" : "Password",
+                text: $password,
                 reveal: $revealSecrets,
                 error: errors["secret"]
             )
-            SecretField(
-                title: "Session Token",
-                prompt: "Optional — for temporary credentials",
-                text: $sessionToken,
-                reveal: $revealSecrets,
-                error: nil
-            )
+
+            if protocolGroup == .s3 {
+                SecretField(
+                    title: "Session Token",
+                    prompt: "Optional — for temporary credentials",
+                    text: $sessionToken,
+                    reveal: $revealSecrets,
+                    error: nil
+                )
+            }
+
             Text("Secrets are saved as a generic-password item per connection in the Keychain.")
                 .font(.caption2)
                 .foregroundStyle(.tertiary)
         }
     }
+
+    // MARK: - Footer
 
     private var footer: some View {
         HStack(spacing: 10) {
@@ -295,7 +616,10 @@ struct ConnectionEditorView: View {
         return false
     }
 
+    // MARK: - Captions
+
     private var endpointCaption: String {
+        if protocolGroup != .s3 { return "" }
         switch provider {
         case .aws:
             return "Leave empty to use https://s3.\(region.isEmpty ? "<region>" : region).amazonaws.com"
@@ -307,10 +631,13 @@ struct ConnectionEditorView: View {
             return "Enter the S3 gateway endpoint for HCP or Vantara."
         case .generic:
             return "Any S3-compatible endpoint, optionally with a path prefix."
+        default:
+            return ""
         }
     }
 
     private var addressingCaption: String {
+        if protocolGroup != .s3 { return "" }
         if provider == .cloudflareR2 {
             return "R2 requires path-style addressing and the auto region."
         }
@@ -320,7 +647,11 @@ struct ConnectionEditorView: View {
         return "Requests use https://bucket.endpoint/key."
     }
 
+    // MARK: - Actions
+
     private func applyPreset(_ newProvider: ProviderKind) {
+        guard protocolGroup == .s3 else { return }
+        lastS3Provider = newProvider
         if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             name = newProvider.displayName
         }
@@ -347,71 +678,171 @@ struct ConnectionEditorView: View {
             endpoint = ""
             region = "us-east-1"
             pathStyle = true
+        default:
+            break
         }
     }
+
+    private func applyProtocolGroup(_ newGroup: ProtocolGroup) {
+        testState = .idle
+        switch newGroup {
+        case .s3:
+            provider = lastS3Provider
+            applyPreset(lastS3Provider)
+        case .webdav:
+            provider = .webdav
+            endpoint = "https://"
+            host = ""
+            portString = ""
+            basePath = ""
+            useTLS = false
+            privateKeyPath = nil
+            region = ""
+            pathStyle = false
+            if provider == .cloudflareR2 { accountID = "" }
+        case .ftp:
+            provider = .ftp
+            endpoint = ""
+            host = ""
+            portString = ""
+            basePath = ""
+            useTLS = false
+            privateKeyPath = nil
+            region = ""
+            pathStyle = false
+            if provider == .cloudflareR2 { accountID = "" }
+        case .sftp:
+            provider = .sftp
+            endpoint = ""
+            host = ""
+            portString = ""
+            basePath = ""
+            useTLS = false
+            privateKeyPath = nil
+            region = ""
+            pathStyle = false
+            if provider == .cloudflareR2 { accountID = "" }
+        }
+    }
+
+    private func choosePrivateKey() {
+        let panel = NSOpenPanel()
+        panel.title = "Select SSH Private Key"
+        panel.allowedContentTypes = [.data]  // not restrictive; keys vary
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        panel.begin { response in
+            if response == .OK, let url = panel.url {
+                privateKeyPath = url.path
+            }
+        }
+    }
+
+    // MARK: - Draft helpers
 
     private func draftProfile() -> ConnectionProfile {
         ConnectionProfile(
             id: profileID,
             name: name.trimmingCharacters(in: .whitespacesAndNewlines),
-            provider: provider,
+            provider: effectiveProvider,
             endpoint: endpoint.trimmingCharacters(in: .whitespacesAndNewlines),
-            region: provider == .cloudflareR2 ? "auto" : region.trimmingCharacters(in: .whitespacesAndNewlines),
+            region: (protocolGroup == .s3 && provider == .cloudflareR2)
+                ? "auto"
+                : region.trimmingCharacters(in: .whitespacesAndNewlines),
             accountID: accountID.trimmingCharacters(in: .whitespacesAndNewlines),
-            pathStyle: provider == .cloudflareR2 ? true : pathStyle
+            pathStyle: (protocolGroup == .s3 && provider == .cloudflareR2) ? true : pathStyle,
+            host: host.trimmingCharacters(in: .whitespacesAndNewlines),
+            port: portValue,
+            basePath: basePath.trimmingCharacters(in: .whitespacesAndNewlines),
+            useTLS: useTLS,
+            privateKeyPath: privateKeyPath
         )
     }
 
     private func draftCredentials() -> S3Credentials {
         let token = sessionToken.trimmingCharacters(in: .whitespacesAndNewlines)
         return S3Credentials(
-            accessKeyID: accessKey.trimmingCharacters(in: .whitespacesAndNewlines),
-            secretAccessKey: secretKey,
+            accessKeyID: username.trimmingCharacters(in: .whitespacesAndNewlines),
+            secretAccessKey: password,
             sessionToken: token.isEmpty ? nil : token
         )
     }
 
+    // MARK: - Validation
+
     private func validate() -> [String: String] {
         var result: [String: String] = [:]
+
         if name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             result["name"] = "Required"
         }
-        if provider == .aws && region.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            result["region"] = "Required"
-        }
-        if provider == .cloudflareR2 && accountID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            result["account"] = "Required"
-        }
-        do {
-            _ = try EndpointResolver.resolve(profile: draftProfile())
-        } catch {
-            let message = (error as? S3Error)?.message ?? error.localizedDescription
-            if provider == .cloudflareR2, accountID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result["account"] = message
-            } else if provider == .aws, region.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                result["region"] = message
-            } else {
-                result["endpoint"] = message
+
+        switch protocolGroup {
+        case .s3:
+            if provider == .aws && region.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result["region"] = "Required"
+            }
+            if provider == .cloudflareR2 && accountID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result["account"] = "Required"
+            }
+            do {
+                _ = try EndpointResolver.resolve(profile: draftProfile())
+            } catch {
+                let message = (error as? S3Error)?.message ?? error.localizedDescription
+                if provider == .cloudflareR2, accountID.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    result["account"] = message
+                } else if provider == .aws, region.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                    result["region"] = message
+                } else {
+                    result["endpoint"] = message
+                }
+            }
+
+        case .webdav:
+            if endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result["endpoint"] = "Required"
+            }
+
+        case .ftp, .sftp:
+            if host.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                result["host"] = "Required"
             }
         }
-        if accessKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+
+        // Username required for all
+        if username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             result["access"] = "Required"
         }
-        if secretKey.isEmpty {
-            result["secret"] = "Required"
+
+        // Password required for WebDAV/FTP always; SFTP only if no private key
+        switch protocolGroup {
+        case .webdav, .ftp:
+            if password.isEmpty {
+                result["secret"] = "Required"
+            }
+        case .sftp:
+            if password.isEmpty && privateKeyPath == nil {
+                result["secret"] = "Required"
+            }
+        case .s3:
+            if password.isEmpty {
+                result["secret"] = "Required"
+            }
         }
+
         return result
     }
+
+    // MARK: - Save / Test
 
     private func save() {
         let validation = validate()
         errors = validation
         saveError = nil
-        let profile = draftProfile()
-        let credentials = draftCredentials()
         guard validation.isEmpty else { return }
         do {
-            try onSave(profile, credentials)
+            try onSave(draftProfile(), draftCredentials())
             dismiss()
         } catch {
             saveError = (error as? S3Error)?.alertMessage ?? error.localizedDescription
@@ -425,13 +856,34 @@ struct ConnectionEditorView: View {
         testState = .testing
         testTask?.cancel()
         let profile = draftProfile()
-        let credentials = draftCredentials()
+        let creds = draftCredentials()
         testTask = Task {
             do {
-                let client = try S3Client(profile: profile, credentials: credentials)
-                let buckets = try await client.listBuckets()
-                guard !Task.isCancelled else { return }
-                testState = .success("Connected — \(buckets.count) bucket\(buckets.count == 1 ? "" : "s") found")
+                switch protocolGroup {
+                case .s3:
+                    let client = try S3Client(profile: profile, credentials: creds)
+                    let buckets = try await client.listBuckets()
+                    guard !Task.isCancelled else { return }
+                    testState = .success("Connected — \(buckets.count) bucket\(buckets.count == 1 ? "" : "s") found")
+
+                case .webdav:
+                    let backend = try WebDAVBackend(profile: profile, credentials: creds)
+                    _ = try await backend.list(prefix: "", maxKeys: 1)
+                    guard !Task.isCancelled else { return }
+                    testState = .success("Connected — WebDAV listing succeeded")
+
+                case .ftp:
+                    let backend = FTPBackend(profile: profile, credentials: creds)
+                    _ = try await backend.list(prefix: "", maxKeys: 1)
+                    guard !Task.isCancelled else { return }
+                    testState = .success("Connected — FTP listing succeeded")
+
+                case .sftp:
+                    let backend = SFTPBackend(profile: profile, credentials: creds)
+                    _ = try await backend.list(prefix: "", maxKeys: 1)
+                    guard !Task.isCancelled else { return }
+                    testState = .success("Connected — SFTP listing succeeded")
+                }
             } catch is CancellationError {
                 testState = .idle
             } catch {
@@ -441,6 +893,8 @@ struct ConnectionEditorView: View {
         }
     }
 }
+
+// MARK: - Reusable subviews
 
 private struct EditorSection<Content: View>: View {
     let title: String
@@ -555,6 +1009,18 @@ private struct SecretField: View {
                 RoundedRectangle(cornerRadius: 7)
                     .strokeBorder(error != nil ? Color.red.opacity(0.55) : Color.secondary.opacity(0.25))
             )
+        }
+    }
+}
+
+// MARK: - ProviderKind helper
+
+private extension ProviderKind {
+    /// True for the five S3-variant providers shown in the grid.
+    var isS3Variant: Bool {
+        switch self {
+        case .aws, .cloudflareR2, .hitachi, .minio, .generic: return true
+        default: return false
         }
     }
 }

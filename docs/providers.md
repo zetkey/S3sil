@@ -132,3 +132,45 @@ section unless marked `[UNVERIFIED]`. The original AWS spec is cited first:
 
 - AWS requires `x-amz-security-token` in the canonical request when a session token is used (<https://docs.aws.amazon.com/general/latest/gr/create-signed-request.html>). S3-compatible servers that accept STS tokens (R2, Ceph RGW, MinIO STS) follow the same header convention; anything not listed is `[UNVERIFIED]`.
 - The AWS SigV4 spec's empty-region edge case matters for R2 (`auto`): sign with the region string the provider documents; R2 explicitly aliases `us-east-1`/empty to `auto` on the server side.
+
+---
+
+# Non-S3 Protocols
+
+Last verified: 2026-11-06. All backends use system tools only (no additional dependencies).
+
+## WebDAV
+
+- **Endpoint**: full HTTP/HTTPS URL of the server root or a subdirectory (e.g. `https://webdav.example.com/remote.php/dav`). Scheme + host + optional path.
+- **Auth**: Basic access authentication (`Authorization: Basic …` base64 via URLSession).
+- **Transport**: HTTPS recommended; HTTP allowed for LAN/testing.
+- **Listing**: `PROPFIND` with `Depth: 1` and a DAV namespace body requesting `displayname`, `getcontentlength`, `getlastmodified`, `getetag`, `resourcetype`.
+- **Operations**: `MKCOL` (create folder), `GET` (download), `PUT` (upload), `DELETE` (files and collections).
+- **Progress**: Full upload/download progress via `URLSession` delegate callbacks.
+- **Limitations**: No Digest/OAuth/Kerberos auth. Self-signed certificates rely on macOS trust evaluation. PROPFIND result ordering and pagination are server-defined — the client lists everything at once. Folder delete is recursive (list contents, delete files, delete collection).
+
+## FTP / FTPS
+
+- **Host**: server hostname or IP; no scheme.
+- **Port**: defaults 21 (FTP) / 990 (implicit FTPS).
+- **Auth**: username + password passed to `/usr/bin/curl` via `--user`.
+- **TLS**: implicit FTPS uses `ftps://` scheme. Explicit FTPS (AUTH TLS) is handled by curl with `--ssl-reqd`.
+- **Transport**: passive mode only (curl default). Active-mode servers behind firewalls are not supported.
+- **Listing**: tries MLSD first, falls back to Unix `ls -l`, then DOS `dir` format. Parsed by `RemoteListingParser`.
+- **Operations**: `curl --quote "MKD …"` (create folder), `curl -o …` (download), `curl -T …` (upload), `curl --quote "DELE …"` / `--quote "RMD …"` (delete).
+- **Progress**: download progress by polling destination file size every 0.5 s. Upload progress reports only at completion.
+- **Limitations**: `curl` is assumed at `/usr/bin/curl` (always present on macOS 14+). Connection timeout: 30 s; request timeout: 300 s. No active-mode support. Recursive folder delete walks the directory tree manually.
+
+## SFTP
+
+- **Host**: server hostname or IP.
+- **Port**: defaults 22.
+- **Auth**: `/usr/bin/sftp` in batch mode. Three modes supported:
+  1. Password-only: `SSH_ASKPASS` + `SSH_ASKPASS_REQUIRE=force` with a temporary script that echoes the password.
+  2. Key-only: `-i /path/to/private/key` + `-o BatchMode=yes`.
+  3. Key+passphrase: `-i` + `SSH_ASKPASS` (askpass provides the passphrase).
+- **Host keys**: trust-on-first-use (TOFU). Keys are stored in `~/Library/Application Support/S3Sil/known_hosts`. The backend uses `-o StrictHostKeyChecking=accept-new -o UserKnownHostsFile=<path>`. No fingerprint verification UI.
+- **Listing**: `ls -l <path>` parsed by `RemoteListingParser` (Unix format).
+- **Operations**: `mkdir`, `get`, `put`, `rm`, `rmdir` via batch file.
+- **Progress**: download progress by polling destination file size. Upload reports only at completion.
+- **Limitations**: Connection timeout via `-o ConnectTimeout=30`. Server keepalive via `-o ServerAliveInterval=60`. No interactive keyboard-interactive auth beyond password. No agent forwarding. No host-based or certificate auth. Recursive folder delete walks the directory tree with `ls -l` + `rm`/`rmdir` bottom-up.

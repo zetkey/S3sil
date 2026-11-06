@@ -2,6 +2,25 @@ import Foundation
 import Testing
 @testable import S3SilKit
 
+@Test("Old profile JSON (no new fields) decodes successfully")
+func backwardCompatDecode() throws {
+    let json = """
+    [{"id":"AABBCCDD-EEFF-1122-3344-556677889900","name":"Test","provider":"aws","endpoint":"","region":"us-east-1","accountID":"","pathStyle":false}]
+    """
+    let data = Data(json.utf8)
+    let decoder = JSONDecoder()
+    let profiles = try decoder.decode([ConnectionProfile].self, from: data)
+    #expect(profiles.count == 1)
+    let p = try #require(profiles.first)
+    #expect(p.name == "Test")
+    #expect(p.provider == .aws)
+    #expect(p.host == "")
+    #expect(p.port == nil)
+    #expect(p.basePath == "")
+    #expect(p.useTLS == false)
+    #expect(p.privateKeyPath == nil)
+}
+
 @Test("Profiles round-trip without credentials in JSON")
 func profileStoreRoundTrip() throws {
     let directory = FileManager.default.temporaryDirectory
