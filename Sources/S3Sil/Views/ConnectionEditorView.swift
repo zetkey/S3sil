@@ -442,12 +442,12 @@ struct ConnectionEditorView: View {
 
         LabeledField(
             title: "Base Path",
-            prompt: "/public_html/",
+            prompt: "public_html",
             text: $basePath,
             monospaced: true,
             error: nil
         )
-        Text("Optional — a subfolder shown as the root in the browser.")
+        Text("Optional — subfolder of the FTP login directory shown as the browser root. Leave empty to start at the login directory.")
             .font(.caption2)
             .foregroundStyle(.tertiary)
     }
@@ -476,12 +476,12 @@ struct ConnectionEditorView: View {
 
         LabeledField(
             title: "Base Path",
-            prompt: "/home/user/files",
+            prompt: "files (relative to your home directory)",
             text: $basePath,
             monospaced: true,
             error: nil
         )
-        Text("Optional — a subfolder shown as the root in the browser.")
+        Text("Optional — subfolder of your SSH home directory shown as the browser root. Leave empty to start at your home directory.")
             .font(.caption2)
             .foregroundStyle(.tertiary)
 

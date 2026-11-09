@@ -17,12 +17,19 @@ public struct SFTPBackend: StorageBackend, Sendable {
 
     // MARK: - Remote path helpers
 
+    /// Server-side directory the browser is rooted at. Empty → the SSH session's
+    /// home directory (sftp's default cwd), not "/" — FileZilla's "remote site"
+    /// default, and the only path that works on chrooted servers (which expose
+    /// "/" as a read-only system root with no user files in it).
     private var basePath: String {
-        let bp = profile.basePath
-        return bp.isEmpty ? "/" : bp
+        let bp = profile.basePath.trimmingCharacters(in: CharacterSet(charactersIn: "/ "))
+        return bp.isEmpty ? "." : bp
     }
 
     private func remotePath(_ key: String) -> String {
+        if basePath == "." {
+            return key.hasPrefix("/") ? key : (key.isEmpty ? "." : key)
+        }
         let base = basePath.hasSuffix("/") ? String(basePath.dropLast()) : basePath
         let cleanKey = key.hasPrefix("/") ? String(key.dropFirst()) : key
         if cleanKey.isEmpty { return base }
@@ -367,7 +374,11 @@ public struct SFTPBackend: StorageBackend, Sendable {
         let normPrefix = parentPrefix.hasSuffix("/") ? parentPrefix : parentPrefix + "/"
         return entries.compactMap { entry in
             guard !entry.name.isEmpty, entry.name != ".", entry.name != ".." else { return nil }
-            let key = normPrefix + entry.name
+            // No leading "/" on keys: `enter()` feeds key straight into
+            // navigate(prefix:) → remotePath(), which joins it onto basePath.
+            // A leading slash would escape the base and list the server root
+            // instead of the folder the user double-clicked.
+            let key = (normPrefix == "/" ? "" : normPrefix) + entry.name
             return S3Object(
                 key: key,
                 name: entry.name,

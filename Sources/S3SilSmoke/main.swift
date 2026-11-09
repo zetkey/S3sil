@@ -87,6 +87,28 @@ if mode == "--sftp" {
     try await smokeSFTP()
     exit(0)
 }
+if mode == "--sftp-debug-list" {
+    let password = ProcessInfo.processInfo.environment["S3SIL_SFTP_PASSWORD"] ?? ""
+    let profile = ConnectionProfile(
+        name: "dbg", provider: .sftp, host: "localhost", port: 2222,
+        basePath: ProcessInfo.processInfo.environment["S3SIL_SFTP_BASE"] ?? "data",
+        privateKeyPath: password.isEmpty ? "/tmp/s3sil-sftp-key" : nil
+    )
+    let backend = SFTPBackend(profile: profile,
+                              credentials: S3Credentials(accessKeyID: "testuser", secretAccessKey: password))
+    for prefix in ["", "data/", "subdir/"] {
+        do {
+            let listing = try await backend.list(prefix: prefix, maxKeys: 1000)
+            print("PREFIX '\(prefix)' → \(listing.objects.count) objects")
+            for o in listing.objects {
+                print("  \(o.isFolder ? "[D]" : "[F]") key='\(o.key)' name='\(o.name)' size=\(o.size)")
+            }
+        } catch {
+            print("PREFIX '\(prefix)' ERR: \(error.localizedDescription)")
+        }
+    }
+    exit(0)
+}
 
 // MARK: - S3 smoke
 
@@ -668,11 +690,9 @@ func smokeSFTP() async throws {
     do {
         try await backend.createFolder(testFolder)
         let listing = try await backend.list(prefix: "", maxKeys: 100)
-        // Keys from SFTP may have a leading "/" and may differ in trailing "/"
-        let expectedKey = testFolder
-        let altKey = "/" + testFolder.dropLast()
-        guard listing.objects.contains(where: { $0.isFolder && ($0.key == expectedKey || $0.key == altKey) }) else {
-            throw SmokeError.assertion("folder not found after create (expected \(expectedKey) or \(altKey), got: \(listing.objects.filter(\.isFolder).map(\.key))")
+        let createdKey = String(testFolder.dropLast()) // trailing "/" stripped by list
+        guard listing.objects.contains(where: { $0.isFolder && $0.key == createdKey }) else {
+            throw SmokeError.assertion("folder not found after create (expected \(createdKey), got: \(listing.objects.filter(\.isFolder).map(\.key))")
         }
         pass("createFolder \(testFolder)")
     } catch { fail("createFolder", error.localizedDescription) }
