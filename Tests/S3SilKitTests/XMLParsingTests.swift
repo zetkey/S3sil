@@ -320,6 +320,30 @@ func parserAutoUnix() {
     #expect(entries[1].isDirectory == true)
 }
 
+@Test("RemoteListingParser parses RHEL/SELinux lines with permission-suffix dot or plus")
+func parserSelinuxSuffix() {
+    let listing = """
+    -rw-r--r--. 1 span span 100 Nov  9 08:00 selinux.txt
+    drwxr-xr-x. 2 span span   6 Nov  9 08:00 subdir
+    -rw-r--r--+ 1 span span 200 Nov  9 08:00 acl.txt
+    """
+    let entries = RemoteListingParser.parse(listing: listing)
+    #expect(entries.count == 3)
+    #expect(entries[0].name == "selinux.txt")
+    #expect(entries[1].isDirectory == true)
+    #expect(entries[1].name == "subdir")
+    #expect(entries[2].name == "acl.txt")
+}
+
+@Test("RemoteListingParser parses year-style ls dates (old files)")
+func parserYearDate() {
+    let entries = RemoteListingParser.parse(listing: "drwxr-xr-x. 2 span span 6 Jan  1  2024 Folder Name")
+    #expect(entries.count == 1)
+    #expect(entries[0].isDirectory == true)
+    #expect(entries[0].name == "Folder Name")
+    #expect(entries[0].lastModified != nil)
+}
+
 @Test("RemoteListingParser handles empty listing")
 func parserEmpty() {
     let entries = RemoteListingParser.parse(listing: "")

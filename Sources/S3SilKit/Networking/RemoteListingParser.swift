@@ -84,9 +84,14 @@ public enum RemoteListingParser {
     // MARK: - Unix `ls -l`
 
     /// Matches e.g. `drwxr-xr-x  2 user group  4096 Jan 01 12:00 filename`
+    /// and the year variant ls uses for files older/newer than ~6 months:
+    /// `drwxr-xr-x. 2 span span 6 Jan  1  2024 Folder Name`
     private static let unixLineRegex = try! NSRegularExpression(
-        pattern: "^([d\\-l])([rwxSstT\\-]{9})\\s+\\d+\\s+\\S+\\s+\\S+\\s+(\\d+)\\s+" +
-                 "(\\w{3})\\s+(\\d{1,2})\\s+(\\d{1,2}:\\d{2})\\s+(.+)$"
+        // Group 2 allows the SELinux/ACL suffix chars (".", "+") RHEL-style
+        // listings append after the 9 permission bits (e.g. "drwxr-xr-x.").
+        // Groups 6/7 are the alternate time-or-year fields, 8 = name.
+        pattern: "^([d\\-l])([rwxSstT\\-]{9}[.+]?|\\S)\\s+\\d+\\s+\\S+\\s+\\S+\\s+(\\d+)\\s+" +
+                 "(\\w{3})\\s+(\\d{1,2})\\s+(?:(\\d{1,2}:\\d{2})|(\\d{4}))\\s+(.+)$"
     )
 
     public static func parseUnixLine(_ line: String) -> ParsedEntry? {
@@ -96,8 +101,7 @@ public enum RemoteListingParser {
               let sizeRange = Range(match.range(at: 3), in: line),
               let monthRange = Range(match.range(at: 4), in: line),
               let dayRange = Range(match.range(at: 5), in: line),
-              let timeRange = Range(match.range(at: 6), in: line),
-              let nameRange = Range(match.range(at: 7), in: line)
+              let nameRange = Range(match.range(at: 8), in: line)
         else { return nil }
 
         let typeChar = line[typeRange]
@@ -107,8 +111,10 @@ public enum RemoteListingParser {
 
         let month = String(line[monthRange])
         let day = String(line[dayRange])
-        let time = String(line[timeRange])
-        let dateString = "\(month) \(day) \(time)"
+        // ls shows HH:MM for recent files, the year for old ones — both are group 6/7.
+        let timeOrYear = Range(match.range(at: 6), in: line).map { String(line[$0]) }
+            ?? (Range(match.range(at: 7), in: line).map { String(line[$0]) } ?? "")
+        let dateString = "\(month) \(day) \(timeOrYear)"
 
         let date = parseUnixDate(dateString)
 
