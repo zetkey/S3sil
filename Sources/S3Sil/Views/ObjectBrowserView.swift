@@ -75,7 +75,9 @@ struct ObjectBrowserView: View {
         .onChange(of: sortOrder) { _, _ in
             selectionAnchor = nil
         }
-        .onChange(of: visibleObjects.map(\.key)) { _, _ in
+        .onChange(of: model.objectsRevision) { _, _ in
+            // Fires when the row set changes; mapping 10k keys per render to
+            // feed onChange was the scroll-time CPU hog.
             selectionAnchor = nil
         }
         .inspector(isPresented: Binding(
@@ -153,9 +155,8 @@ struct ObjectBrowserView: View {
     // MARK: - Content
 
     private var visibleObjects: [S3Object] {
-        let filtered = model.filteredObjects
-        guard !sortOrder.isEmpty else { return filtered }
-        return filtered.sorted(using: sortOrder)
+        model.sortDescriptors = sortOrder
+        return model.sortedVisibleObjects()
     }
 
     private var content: some View {

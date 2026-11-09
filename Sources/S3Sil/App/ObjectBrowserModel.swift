@@ -43,10 +43,37 @@ final class ObjectBrowserModel {
         objects.filter { selection.contains($0.key) }
     }
 
+    /// Bumped whenever `objects` changes. Lets the view observe row-set changes
+    /// without materializing a 10k-element key array per render.
+    var objectsRevision: Int {
+        objects.count + (hasMore ? 1 : 0) + (loadError == nil ? 0 : 10_000_000) + prefix.hashValue
+    }
+
     var filteredObjects: [S3Object] {
         let term = searchText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !term.isEmpty else { return objects }
         return objects.filter { $0.name.localizedCaseInsensitiveContains(term) }
+    }
+
+    /// Sort applied by the view; kept here so the sorted result is cached
+    /// instead of re-sorting 10k rows on every SwiftUI render pass.
+    var sortDescriptors: [KeyPathComparator<S3Object>] = []
+
+    private var cachedSort: (inputs: (count: Int, descriptorCount: Int), rows: [S3Object])?
+    /// Filtered rows in the user's chosen order. Cached until the filtered set
+    /// or descriptors change. Descriptor identity is approximated by count —
+    /// the table only ever swaps between no-sort and one-column sort.
+    func sortedVisibleObjects() -> [S3Object] {
+        let filtered = filteredObjects
+        let key = (count: filtered.count, descriptorCount: sortDescriptors.count)
+        if let cached = cachedSort,
+           cached.inputs.count == key.count,
+           cached.inputs.descriptorCount == key.descriptorCount {
+            return cached.rows
+        }
+        let rows = sortDescriptors.isEmpty ? filtered : filtered.sorted(using: sortDescriptors)
+        cachedSort = (key, rows)
+        return rows
     }
 
     var segments: [(name: String, prefix: String)] {
@@ -80,6 +107,7 @@ final class ObjectBrowserModel {
             let page = try await backend.list(prefix: prefix, maxKeys: 1000)
             guard generation == self.generation else { return }
             objects = Self.sorted(page.objects)
+            cachedSort = nil
             hasMore = page.isTruncated
             let keys = Set(objects.map(\.key))
             selection.formIntersection(keys)
@@ -107,6 +135,7 @@ final class ObjectBrowserModel {
             guard generation == self.generation else { return }
             let existing = Set(objects.map(\.key))
             objects = Self.sorted(objects + page.objects.filter { !existing.contains($0.key) })
+            cachedSort = nil
             hasMore = page.isTruncated
         } catch is CancellationError {
             return
