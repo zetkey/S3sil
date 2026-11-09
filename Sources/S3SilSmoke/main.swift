@@ -604,15 +604,18 @@ func smokeFTP() async throws {
 }
 
 func smokeSFTP() async throws {
+    // S3SIL_SFTP_PASSWORD set → password auth (tests the SSH_ASKPASS path);
+    // otherwise key auth via /tmp/s3sil-sftp-key.
+    let password = ProcessInfo.processInfo.environment["S3SIL_SFTP_PASSWORD"] ?? ""
     let profile = ConnectionProfile(
         name: "SFTP Smoke",
         provider: .sftp,
         host: "localhost",
         port: 2222,
         basePath: "data",
-        privateKeyPath: "/tmp/s3sil-sftp-key"
+        privateKeyPath: password.isEmpty ? "/tmp/s3sil-sftp-key" : nil
     )
-    let creds = S3Credentials(accessKeyID: "testuser", secretAccessKey: "")
+    let creds = S3Credentials(accessKeyID: "testuser", secretAccessKey: password)
     let backend = SFTPBackend(profile: profile, credentials: creds)
     let testKey = "smoke-test-\(UUID().uuidString.prefix(8)).txt"
     let testFolder = "smoke-testdir-\(UUID().uuidString.prefix(8))/"

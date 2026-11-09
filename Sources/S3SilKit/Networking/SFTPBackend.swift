@@ -172,11 +172,6 @@ public struct SFTPBackend: StorageBackend, Sendable {
 
         let knownHostsURL = try knownHostsPath()
 
-        let batchFile = try writeTempFile(
-            content: commands + "\nexit\n",
-            prefix: "s3sil-sftp-batch-"
-        )
-
         var askpassScript: URL?
         var env = ProcessInfo.processInfo.environment
 
@@ -190,7 +185,6 @@ public struct SFTPBackend: StorageBackend, Sendable {
         }
 
         defer {
-            try? FileManager.default.removeItem(at: batchFile)
             if let s = askpassScript { try? FileManager.default.removeItem(at: s) }
         }
 
@@ -199,10 +193,17 @@ public struct SFTPBackend: StorageBackend, Sendable {
         // Identity file for key auth
         if let keyPath = profile.privateKeyPath, !keyPath.isEmpty {
             args.append(contentsOf: ["-i", keyPath])
+        } else if needsAskpass {
+            // Password-only login: never let agent/default keys eat the server's
+            // MaxAuthTries before the password attempt (FileZilla behaves the same).
+            args.append(contentsOf: ["-o", "IdentitiesOnly=yes", "-o", "PubkeyAuthentication=no"])
         }
 
-        args.append(contentsOf: ["-b", batchFile.path])
-        args.append(contentsOf: ["-o", "BatchMode=yes"])
+        // NOTE: do NOT use `sftp -b <file>` and do NOT pass `-o BatchMode=yes`:
+        // both imply BatchMode, which disables password prompting (and thus
+        // SSH_ASKPASS) — the reason SFTP password logins silently failed.
+        // Commands are piped via stdin instead; non-interactive-ness comes from
+        // the closed pipe + SSH_ASKPASS_REQUIRE=force.
         args.append(contentsOf: ["-o", "StrictHostKeyChecking=accept-new"])
         args.append(contentsOf: ["-o", "UserKnownHostsFile=\(knownHostsURL.path)"])
         args.append(contentsOf: ["-o", "ConnectTimeout=30"])
@@ -218,23 +219,61 @@ public struct SFTPBackend: StorageBackend, Sendable {
         let result = try await runProcess(
             executable: "/usr/bin/sftp",
             arguments: args,
-            environment: env
+            environment: env,
+            stdin: commands + "\nexit\n"
         )
 
+        // Non-zero exit = auth/connection failure (e.g. wrong password → 255).
         guard result.exitCode == 0 else {
             throw S3Error(
                 code: "SftpError",
-                message: result.stderr.isEmpty
-                    ? "sftp exited with code \(result.exitCode)"
-                    : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+                message: Self.sftpCommandFailure(in: result.stderr)
+                    ?? (result.stderr.isEmpty
+                        ? "sftp exited with code \(result.exitCode)"
+                        : result.stderr.trimmingCharacters(in: .whitespacesAndNewlines))
             )
+        }
+
+        // In stdin mode sftp command errors (Can't ls/rm/mkdir, No such file,
+        // Permission denied, …) are reported on stderr while exit stays 0.
+        if let failure = Self.sftpCommandFailure(in: result.stderr) {
+            throw S3Error(code: "SftpError", message: failure)
         }
 
         return result.stdout
     }
 
+    /// sftp failure lines that do not set a non-zero exit in stdin mode.
+    private static let sftpErrorMarkers = [
+        "Can't ", "Couldn't ", "Unable to ",
+        "No such file or directory", "Permission denied",
+        "Failure", "Host key verification failed",
+    ]
+
+    static func sftpCommandFailure(in stderr: String) -> String? {
+        // OpenSSH writes CRLF and informational banners on stderr; strip both so
+        // the failure reason (e.g. "Permission denied") is what the user sees.
+        let noise: [String] = [
+            "WARNING:", "post-quantum", "store now, decrypt later",
+            "openssh.com", "Permanently added", "Connected to",
+        ]
+        let lines = stderr
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        let failures = lines.filter { line in
+            !line.isEmpty
+                && !noise.contains { line.contains($0) }
+                && sftpErrorMarkers.contains { line.contains($0) }
+        }
+        guard !failures.isEmpty else { return nil }
+        return failures.joined(separator: "\n")
+    }
+
     private func runProcess(executable: String, arguments: [String],
-                            environment: [String: String]) async throws -> ProcessResult {
+                            environment: [String: String],
+                            stdin: String? = nil) async throws -> ProcessResult {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: executable)
@@ -245,6 +284,32 @@ public struct SFTPBackend: StorageBackend, Sendable {
             let stderrPipe = Pipe()
             process.standardOutput = stdoutPipe
             process.standardError = stderrPipe
+            var stdinPipe: Pipe?
+            if stdin != nil {
+                let pipe = Pipe()
+                process.standardInput = pipe
+                stdinPipe = pipe
+            }
+
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(throwing: S3Error(
+                    code: "SftpError",
+                    message: "Failed to launch sftp: \(error.localizedDescription)"
+                ))
+                return
+            }
+
+            // Write after run(): a payload larger than the 64 KiB pipe buffer
+            // would block forever if written before the child exists to drain it.
+            if let stdin, let pipe = stdinPipe {
+                let handle = pipe.fileHandleForWriting
+                DispatchQueue.global().async {
+                    handle.write(Data(stdin.utf8))
+                    handle.closeFile()
+                }
+            }
 
             process.terminationHandler = { proc in
                 let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
@@ -255,15 +320,6 @@ public struct SFTPBackend: StorageBackend, Sendable {
                     exitCode: proc.terminationStatus,
                     stdout: stdout,
                     stderr: stderr
-                ))
-            }
-
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(throwing: S3Error(
-                    code: "SftpError",
-                    message: "Failed to launch sftp: \(error.localizedDescription)"
                 ))
             }
         }
