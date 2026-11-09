@@ -123,7 +123,7 @@ struct ObjectBrowserView: View {
                 Button {
                     Task { await model.navigate(to: "") }
                 } label: {
-                    Text(model.containerName)
+                    Text(model.containerDisplayName)
                         .font(.system(size: 11, weight: .medium, design: .monospaced))
                 }
                 .buttonStyle(.plain)
@@ -179,13 +179,6 @@ struct ObjectBrowserView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(.thinMaterial)
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .strokeBorder(.separator.opacity(0.6))
-        )
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
         .dropDestination(for: URL.self) { urls, _ in
             let files = urls.filter(FilePanels.isRegularFile)
             guard !files.isEmpty else { return false }
