@@ -94,7 +94,65 @@ public enum RemoteListingParser {
                  "(\\w{3})\\s+(\\d{1,2})\\s+(?:(\\d{1,2}:\\d{2})|(\\d{4}))\\s+(.+)$"
     )
 
+    /// Month abbreviations → number, for the fast (regex-free) Unix parser.
+    private static let monthNumbers: [String: Int] = [
+        "Jan": 1, "Feb": 2, "Mar": 3, "Apr": 4, "May": 5, "Jun": 6,
+        "Jul": 7, "Aug": 8, "Sep": 9, "Oct": 10, "Nov": 11, "Dec": 12,
+    ]
+
+    /// Fast path for the overwhelmingly common `ls -l` shape. Fields:
+    /// perms(nchars) nlinks owner group size month day [time|year] name…
+    /// (name may itself contain spaces → everything after the date is the name).
+    /// Returns nil when the line doesn't match; caller falls back to the regex.
+    static func parseUnixLineFast(_ line: String) -> ParsedEntry? {
+        var parts = line.split(separator: " ", omittingEmptySubsequences: true).map(Substring.init)
+        if parts.count < 7 { return nil }
+
+        let perms = parts[0]
+        let first = perms.first
+        guard first == "d" || first == "-" || first == "l" else { return nil }
+        // Permission chars + optional SELinux "." / ACL "+" suffix (≥ 9 total).
+        guard perms.count >= 9 else { return nil }
+        guard Int(parts[1]) != nil else { return nil }
+        let size = Int64(parts[4]) ?? -1
+        guard size >= 0 else { return nil }
+
+        let month = String(parts[5])
+        guard monthNumbers[String(month.prefix(3))] != nil else { return nil }
+        let day = Int(parts[6]) ?? -1
+        guard day >= 1, day <= 31 else { return nil }
+
+        // Field 7: "HH:MM" or a 4-digit year; the rest is the file name.
+        let timeField = parts[7]
+        let isTime = timeField.contains(":")
+        let isYear = timeField.count == 4 && Int(timeField) != nil
+        guard isTime || isYear else { return nil }
+
+        let nameParts = parts[8...]
+        guard !nameParts.isEmpty else { return nil }
+        let name = nameParts.joined(separator: " ")
+
+        // Date: build a Date without DateFormatter (DateFormatter.date(from:)
+        // costs ~20µs × 10k rows = visible seconds on huge listings).
+        var comps = DateComponents()
+        comps.month = monthNumbers[String(month.prefix(3))]
+        comps.day = day
+        comps.hour = 12 // midday avoids DST boundary artifacts
+        if isTime {
+            let hhmm = timeField.split(separator: ":")
+            comps.hour = Int(String(hhmm.first ?? "")) ?? 12
+            comps.minute = Int(String(hhmm.count > 1 ? hhmm[1] : "")) ?? 0
+            comps.year = Calendar.current.component(.year, from: Date())
+        } else {
+            comps.year = Int(timeField)
+        }
+        let date = Calendar.current.date(from: comps)
+
+        return ParsedEntry(name: name, isDirectory: first == "d", size: size, lastModified: date)
+    }
+
     public static func parseUnixLine(_ line: String) -> ParsedEntry? {
+        if let fast = parseUnixLineFast(line) { return fast }
         let nsRange = NSRange(line.startIndex..<line.endIndex, in: line)
         guard let match = unixLineRegex.firstMatch(in: line, range: nsRange),
               let typeRange = Range(match.range(at: 1), in: line),

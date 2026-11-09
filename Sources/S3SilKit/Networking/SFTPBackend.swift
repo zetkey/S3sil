@@ -357,11 +357,33 @@ public struct SFTPBackend: StorageBackend, Sendable {
                 }
             }
 
+            // Drain stdout/stderr WHILE the child runs — waiting for exit first
+            // deadlocks on large listings: the 64 KiB pipe fills, sftp blocks
+            // writing, never exits, and the termination handler never fires.
+            var outBox = Data()
+            var errBox = Data()
+            let dataLock = NSLock()
+            stdoutPipe.fileHandleForReading.readabilityHandler = { handle in
+                let d = handle.availableData
+                if d.isEmpty { handle.readabilityHandler = nil; return }
+                dataLock.lock(); outBox.append(d); dataLock.unlock()
+            }
+            stderrPipe.fileHandleForReading.readabilityHandler = { handle in
+                let d = handle.availableData
+                if d.isEmpty { handle.readabilityHandler = nil; return }
+                dataLock.lock(); errBox.append(d); dataLock.unlock()
+            }
+
             process.terminationHandler = { proc in
-                let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
-                let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
-                let stdout = String(data: outData, encoding: .utf8) ?? ""
-                let stderr = String(data: errData, encoding: .utf8) ?? ""
+                // Handlers may still hold the final bytes; read to EOF after exit.
+                let tailOut = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+                let tailErr = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+                dataLock.lock()
+                outBox.append(tailOut)
+                errBox.append(tailErr)
+                let stdout = String(data: outBox, encoding: .utf8) ?? ""
+                let stderr = String(data: errBox, encoding: .utf8) ?? ""
+                dataLock.unlock()
                 continuation.resume(returning: ProcessResult(
                     exitCode: proc.terminationStatus,
                     stdout: stdout,
