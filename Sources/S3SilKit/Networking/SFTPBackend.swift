@@ -38,12 +38,39 @@ public struct SFTPBackend: StorageBackend, Sendable {
 
     // MARK: - list
 
+    /// Absolute server path of the most recently listed directory (what the
+    /// server's `pwd` reports there). Empty until the first successful list.
+    public var lastRealPath: String { realPathBox.value }
+
+    /// Reference box — SFTPBackend is a struct copied per call.
+    private let realPathBox = RealPathBox()
+    private final class RealPathBox: @unchecked Sendable {
+        let lock = NSLock()
+        var storage = ""
+        var value: String {
+            get { lock.lock(); defer { lock.unlock() }; return storage }
+            set { lock.lock(); defer { lock.unlock() }; storage = newValue }
+        }
+    }
+
     public func list(prefix: String, maxKeys: Int) async throws -> ObjectListing {
         let path = remotePath(prefix)
-        let commands = "ls -l \(escapeArg(path))"
+        // pwd rides along in the same batch — zero extra round trips — so the
+        // UI can show the real OS path (FileZilla's "remote site").
+        let commands = "pwd\nls -l \(escapeArg(path))"
         let raw = try await runBatch(commands: commands)
 
-        let entries = RemoteListingParser.parse(listing: stripSFTPPrompts(raw))
+        var realPath = ""
+        var listing = raw
+        if let pwdRange = raw.range(of: "Remote working directory: ") {
+            let lineEnd = raw[pwdRange.upperBound...].firstIndex(of: "\n") ?? raw.endIndex
+            realPath = String(raw[pwdRange.upperBound..<lineEnd])
+                .trimmingCharacters(in: .whitespaces)
+            listing = String(raw[lineEnd...])
+        }
+        realPathBox.value = realPath
+
+        let entries = RemoteListingParser.parse(listing: stripSFTPPrompts(listing))
         let objects = entriesToObjects(entries, parentPrefix: prefix)
 
         let limited = maxKeys > 0 ? Array(objects.prefix(maxKeys)) : objects
@@ -184,7 +211,7 @@ public struct SFTPBackend: StorageBackend, Sendable {
 
         let needsAskpass = !credentials.secretAccessKey.isEmpty
         if needsAskpass {
-            let script = try writeAskpassScript(password: credentials.secretAccessKey)
+            let script = try Self.writeAskpassScript(password: credentials.secretAccessKey)
             askpassScript = script
             env["SSH_ASKPASS"] = script.path
             env["SSH_ASKPASS_REQUIRE"] = "force"
@@ -215,6 +242,18 @@ public struct SFTPBackend: StorageBackend, Sendable {
         args.append(contentsOf: ["-o", "UserKnownHostsFile=\(knownHostsURL.path)"])
         args.append(contentsOf: ["-o", "ConnectTimeout=30"])
         args.append(contentsOf: ["-o", "ServerAliveInterval=60"])
+        // Reuse one authenticated master connection across operations (OpenSSH's
+        // own connection sharing). `ensureMaster` starts `ssh -M -N -f` once;
+        // every sftp op then multiplexes over that socket — FileZilla-class
+        // latency without any custom session/framing code.
+        let controlPath = Self.controlPath(profile: profile, credentials: credentials)
+        try await Self.ensureMaster(
+            profile: profile, credentials: credentials,
+            knownHostsPath: knownHostsURL.path, controlPath: controlPath
+        )
+        args.append(contentsOf: [
+            "-o", "ControlPath=\(controlPath)",
+        ])
 
         if port != 22 {
             args.append(contentsOf: ["-P", "\(port)"])
@@ -342,10 +381,12 @@ public struct SFTPBackend: StorageBackend, Sendable {
         return url
     }
 
-    private func writeAskpassScript(password: String) throws -> URL {
+    static func writeAskpassScript(password: String) throws -> URL {
         let safePass = password.replacingOccurrences(of: "'", with: "'\\''")
         let script = "#!/bin/sh\necho '\(safePass)'\n"
-        let url = try writeTempFile(content: script, prefix: "s3sil-sftp-askpass-")
+        let dir = FileManager.default.temporaryDirectory
+        let url = dir.appendingPathComponent("s3sil-sftp-askpass-\(UUID().uuidString)")
+        try script.write(to: url, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: url.path)
         return url
     }
@@ -387,6 +428,120 @@ public struct SFTPBackend: StorageBackend, Sendable {
                 etag: "",
                 kind: entry.isDirectory ? .folder : .file
             )
+        }
+    }
+
+    /// Unix-socket path for the shared SSH master connection, unique per
+    /// user@host:port. Lives in the app's data dir alongside known_hosts.
+    static func controlPath(profile: ConnectionProfile, credentials: S3Credentials) -> String {
+        let dir = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".s3sil", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let port = profile.port ?? 22
+        let safeHost = profile.host.replacingOccurrences(of: "[^A-Za-z0-9._-]", with: "_", options: .regularExpression)
+        let safeUser = credentials.accessKeyID.replacingOccurrences(of: "[^A-Za-z0-9._-]", with: "_", options: .regularExpression)
+        return dir.appendingPathComponent("cm-\(safeUser)@\(safeHost):\(port)").path
+    }
+
+    /// Starts a backgrounded `ssh -M -N -f` master for user@host:port if one is
+    /// not already listening. Idempotent: checks the ControlPath socket via
+    /// `ssh -O check` before spawning. Subsequent sftp ops multiplex over it.
+    static func ensureMaster(
+        profile: ConnectionProfile, credentials: S3Credentials,
+        knownHostsPath: String, controlPath: String
+    ) async throws {
+        let port = profile.port ?? 22
+        let needsAskpass = !credentials.secretAccessKey.isEmpty
+        var env = ProcessInfo.processInfo.environment
+        var askpassURL: URL?
+        if needsAskpass {
+            let script = try Self.writeAskpassScript(password: credentials.secretAccessKey)
+            askpassURL = script
+            env["SSH_ASKPASS"] = script.path
+            env["SSH_ASKPASS_REQUIRE"] = "force"
+            env["DISPLAY"] = env["DISPLAY"] ?? ":0"
+        }
+        defer {
+            if let u = askpassURL { try? FileManager.default.removeItem(at: u) }
+        }
+
+        // In-process cache: skip the `ssh -O check` subprocess on every op.
+        if await masterUpTracks[controlPath] == true { return }
+
+        // Fast path: master already alive (e.g. from a previous app run).
+        let check = Process()
+        check.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        check.arguments = [
+            "-O", "check",
+            "-o", "ControlPath=\(controlPath)",
+            "\(credentials.accessKeyID)@\(profile.host)",
+        ]
+        check.standardOutput = Pipe()
+        check.standardError = Pipe()
+        try? check.run()
+        check.waitUntilExit()
+        if check.terminationStatus == 0 {
+            masterUpTracks[controlPath] = true
+            return
+        }
+
+        // Spawn the master. It authenticates like any ssh session: keys or
+        // askpass for the password — BatchMode is NOT used.
+        let master = Process()
+        master.executableURL = URL(fileURLWithPath: "/usr/bin/ssh")
+        var mArgs: [String] = ["-M", "-N", "-f"]
+        if let keyPath = profile.privateKeyPath, !keyPath.isEmpty {
+            mArgs.append(contentsOf: ["-i", keyPath])
+        } else if needsAskpass {
+            mArgs.append(contentsOf: ["-o", "IdentitiesOnly=yes", "-o", "PubkeyAuthentication=no"])
+        }
+        mArgs.append(contentsOf: [
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "UserKnownHostsFile=\(knownHostsPath)",
+            "-o", "ConnectTimeout=30",
+            "-o", "ServerAliveInterval=60",
+            "-o", "ControlPath=\(controlPath)",
+            "-o", "ControlPersist=10m",
+        ])
+        if port != 22 {
+            mArgs.append(contentsOf: ["-p", "\(port)"])
+        }
+        mArgs.append("\(credentials.accessKeyID)@\(profile.host)")
+
+        master.arguments = mArgs
+        master.environment = env
+        master.standardOutput = Pipe()
+        master.standardError = Pipe()
+
+        // Give the handshake a bounded wait; -f backgrounds itself on success.
+        try master.run()
+        let deadline = Date().addingTimeInterval(35)
+        while master.isRunning, Date() < deadline {
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+
+        guard FileManager.default.fileExists(atPath: controlPath) else {
+            if master.isRunning { master.terminate() }
+            throw S3Error(
+                code: "SftpError",
+                message: "Could not establish the SSH master connection (auth failed or host unreachable)."
+            )
+        }
+        masterUpTracks[controlPath] = true
+    }
+
+    /// controlPath → master confirmed alive in this app run.
+    private static var masterUpTracks: [String: Bool] {
+        get { LockIsolatedBox.value }
+        set { LockIsolatedBox.value = newValue }
+    }
+
+    private final class LockIsolatedBox {
+        private static let lock = NSLock()
+        private static var storage: [String: Bool] = [:]
+        static var value: [String: Bool] {
+            get { lock.lock(); defer { lock.unlock() }; return storage }
+            set { lock.lock(); defer { lock.unlock() }; storage = newValue }
         }
     }
 
